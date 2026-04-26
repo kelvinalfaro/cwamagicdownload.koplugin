@@ -11,7 +11,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.7.0",
+    version = "0.7.1",
     settings = nil,
     is_syncing = false,
 }
@@ -370,13 +370,18 @@ function CwaMagicDownload:addToMainMenu(menu_items)
             },
             {
                 text = _("Shelves to sync"),
-                sub_item_table = self:getShelfMenuItems(),
+                sub_item_table_func = function()
+                    return self:getShelfMenuItems()
+                end,
             },
             {
                 text = _("Refresh shelf list from CWA"),
                 keep_menu_open = true,
-                callback = function()
+                callback = function(touchmenu_instance)
                     self:refreshShelfList(true)
+                    if touchmenu_instance then
+                        touchmenu_instance:updateItems()
+                    end
                 end,
             },
             {
@@ -486,22 +491,35 @@ function CwaMagicDownload:getShelfMenuItems()
         {
             text = _("Refresh shelf list from CWA"),
             keep_menu_open = true,
-            callback = function()
+            callback = function(touchmenu_instance)
                 self:refreshShelfList(true)
+                if touchmenu_instance then
+                    touchmenu_instance.item_table = self:getShelfMenuItems()
+                    touchmenu_instance:updateItems()
+                end
             end,
             separator = true,
         },
         {
             text = _("Magic shelves"),
-            sub_item_table = shelfItems(magic),
+            sub_item_table_func = function()
+                local current_magic = self:groupShelvesForMenu()
+                return shelfItems(current_magic)
+            end,
         },
         {
             text = _("Regular shelves"),
-            sub_item_table = shelfItems(regular),
+            sub_item_table_func = function()
+                local _, current_regular = self:groupShelvesForMenu()
+                return shelfItems(current_regular)
+            end,
         },
         {
             text = _("Built-in OPDS feeds"),
-            sub_item_table = shelfItems(builtin),
+            sub_item_table_func = function()
+                local _, _, current_builtin = self:groupShelvesForMenu()
+                return shelfItems(current_builtin)
+            end,
         },
     }
 end

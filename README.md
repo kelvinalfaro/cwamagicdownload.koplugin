@@ -52,7 +52,6 @@ Set:
 
 - KOReader with plugin support.
 - A Calibre-Web-Automated instance with OPDS enabled.
-- Android builds need `/system/bin/curl` available for downloads.
 
 ## License
 

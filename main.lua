@@ -11,7 +11,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.7.1",
+    version = "0.8.0",
     settings = nil,
     is_syncing = false,
 }
@@ -44,7 +44,9 @@ CwaMagicDownload.default_settings = {
     download_root = nil,
     auto_sync = false,
     read_filter = "unread",
+    shelf_filters = nil,
     prune_unmatched = false,
+    dedupe_across_shelves = true,
 }
 
 local READ_FILTERS = {
@@ -327,6 +329,36 @@ function CwaMagicDownload:migrateSelectedShelves()
         end
         self.settings.selected_shelves[selected_id] = true
     end
+    if type(self.settings.shelf_filters) ~= "table" then
+        self.settings.shelf_filters = {}
+    end
+end
+
+function CwaMagicDownload:getShelfFilter(shelf)
+    return self.settings.shelf_filters
+        and shelf
+        and self.settings.shelf_filters[shelf.id]
+        or self.settings.read_filter
+        or "unread"
+end
+
+function CwaMagicDownload:setShelfFilter(shelf, filter)
+    self.settings.shelf_filters = self.settings.shelf_filters or {}
+    if filter == self.settings.read_filter then
+        self.settings.shelf_filters[shelf.id] = nil
+    else
+        self.settings.shelf_filters[shelf.id] = filter
+    end
+    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+end
+
+function CwaMagicDownload:getShelfFilterLabel(shelf)
+    local filter_id = self:getShelfFilter(shelf)
+    local filter = getReadFilterById(filter_id)
+    if self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] then
+        return filter.name
+    end
+    return T(_("Default: %1"), filter.name)
 end
 
 function CwaMagicDownload:groupShelvesForMenu()
@@ -402,6 +434,17 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Skip duplicates across selected shelves"),
+                checked_func = function()
+                    return self.settings.dedupe_across_shelves
+                end,
+                help_text = _("When enabled, each book is downloaded into only the first selected shelf that matches it during a sync run."),
+                callback = function()
+                    self.settings.dedupe_across_shelves = not self.settings.dedupe_across_shelves
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            },
+            {
                 text = _("Sync when KOReader starts"),
                 checked_func = function()
                     return self.settings.auto_sync
@@ -468,19 +511,66 @@ function CwaMagicDownload:addToMainMenu(menu_items)
 end
 
 function CwaMagicDownload:getShelfMenuItems()
+    local function shelfFilterItems(shelf)
+        local items = {}
+        table.insert(items, {
+            text_func = function()
+                return T(_("Use global default (%1)"), getReadFilterById(self.settings.read_filter).name)
+            end,
+            checked_func = function()
+                return not (self.settings.shelf_filters and self.settings.shelf_filters[shelf.id])
+            end,
+            callback = function()
+                self.settings.shelf_filters = self.settings.shelf_filters or {}
+                self.settings.shelf_filters[shelf.id] = nil
+                G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+            end,
+        })
+        for _, filter in ipairs(READ_FILTERS) do
+            table.insert(items, {
+                text = filter.name,
+                checked_func = function()
+                    return self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] == filter.id
+                end,
+                callback = function()
+                    self:setShelfFilter(shelf, filter.id)
+                end,
+            })
+        end
+        return items
+    end
+
     local function shelfItems(shelves)
         local items = {}
         for _, shelf in ipairs(shelves) do
             table.insert(items, {
-                text = shelf.name,
+                text_func = function()
+                    local checked = self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
+                    local mark = checked and "[x] " or "[ ] "
+                    return mark .. shelf.name .. " (" .. self:getShelfFilterLabel(shelf) .. ")"
+                end,
                 checked_func = function()
                     return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
                 end,
-                callback = function()
-                    self.settings.selected_shelves = self.settings.selected_shelves or {}
-                    self.settings.selected_shelves[shelf.id] = not self.settings.selected_shelves[shelf.id]
-                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
-                end,
+                sub_item_table = {
+                    {
+                        text = _("Sync this shelf"),
+                        checked_func = function()
+                            return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
+                        end,
+                        callback = function()
+                            self.settings.selected_shelves = self.settings.selected_shelves or {}
+                            self.settings.selected_shelves[shelf.id] = not self.settings.selected_shelves[shelf.id]
+                            G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            return T(_("Read status filter: %1"), self:getShelfFilterLabel(shelf))
+                        end,
+                        sub_item_table = shelfFilterItems(shelf),
+                    },
+                },
             })
         end
         return items
@@ -691,13 +781,14 @@ function CwaMagicDownload:loadReadIds()
     return read_ids
 end
 
-function CwaMagicDownload:collectShelfBooks(shelf, read_ids)
+function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
     local selected = {}
     local limit = self.settings.limit or 25
     local next_path = shelf.path
     local page = 0
     local feed_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-feed.xml"
-    local read_filter = self.settings.read_filter or "unread"
+    local read_filter = self:getShelfFilter(shelf)
+    local duplicate_count = 0
 
     while next_path and page < 100 and #selected < limit do
         page = page + 1
@@ -710,14 +801,18 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids)
         local xml = readFile(feed_file) or ""
         for _, book in ipairs(parseEntries(xml, self.settings.format_order)) do
             if filterAllowsBook(read_filter, book.id, read_ids) then
-                table.insert(selected, book)
-                if #selected >= limit then break end
+                if seen_book_ids and book.id and seen_book_ids[book.id] then
+                    duplicate_count = duplicate_count + 1
+                else
+                    table.insert(selected, book)
+                    if #selected >= limit then break end
+                end
             end
         end
         next_path = parseNextPath(xml)
     end
 
-    return selected
+    return selected, nil, duplicate_count
 end
 
 function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
@@ -750,10 +845,9 @@ function CwaMagicDownload:syncSelectedShelf()
         return
     end
     self.is_syncing = true
-    local filter = getReadFilterById(self.settings.read_filter or "unread")
     local count = selectedShelfCount(self.settings)
-    self:showMessage(T(_("Syncing %1 shelves\nFilter: %2\nPlease wait. KOReader may not respond until this finishes."),
-        count, filter.name), 120)
+    self:showMessage(T(_("Syncing %1 shelves\nPlease wait. KOReader may not respond until this finishes."),
+        count), 120)
     UIManager:scheduleIn(0.25, function()
         local ok, err = pcall(function()
             self:syncSelectedShelfNow()
@@ -766,13 +860,12 @@ function CwaMagicDownload:syncSelectedShelf()
     end)
 end
 
-function CwaMagicDownload:syncOneShelf(shelf, read_ids)
+function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
     local root = self.settings.download_root or getHomeDir()
     local target_dir = joinPath(root, shelf.folder)
-    local read_filter = self.settings.read_filter or "unread"
     os.execute("mkdir -p " .. shellQuote(target_dir))
 
-    local books, err = self:collectShelfBooks(shelf, read_ids)
+    local books, err, duplicates = self:collectShelfBooks(shelf, read_ids, seen_book_ids)
     if not books then
         return { failed = 1, message = err or _("Could not fetch the shelf feed. Check Wi-Fi and login.") }
     end
@@ -783,6 +876,9 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids)
     local downloaded, skipped, failed, pruned, retimed = 0, 0, 0, 0, 0
     local wanted_files = {}
     for _, book in ipairs(books) do
+        if seen_book_ids and book.id then
+            seen_book_ids[book.id] = true
+        end
         local filename = safeFilename(book.title, book.format)
         wanted_files[filename] = true
         local out_path = joinPath(target_dir, filename)
@@ -815,7 +911,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids)
         end
     end
 
-    if self.settings.prune_unmatched then
+    if self.settings.prune_unmatched and (not seen_book_ids or (duplicates or 0) == 0) then
         pruned = self:pruneUnmatchedFiles(target_dir, wanted_files)
     end
 
@@ -825,6 +921,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids)
         failed = failed,
         pruned = pruned,
         retimed = retimed,
+        duplicates = duplicates or 0,
         folder = target_dir,
     }
 end
@@ -853,9 +950,15 @@ function CwaMagicDownload:syncSelectedShelfNow()
         return
     end
 
-    local read_filter = self.settings.read_filter or "unread"
     local read_ids = {}
-    if read_filter ~= "all" then
+    local needs_read_ids = false
+    for _, shelf in ipairs(selected_shelves) do
+        if self:getShelfFilter(shelf) ~= "all" then
+            needs_read_ids = true
+            break
+        end
+    end
+    if needs_read_ids then
         read_ids = self:loadReadIds()
         if not read_ids then
             self:showMessage(_("Could not fetch read status. Check Wi-Fi and login."))
@@ -864,10 +967,11 @@ function CwaMagicDownload:syncSelectedShelfNow()
         end
     end
 
-    local totals = { downloaded = 0, skipped = 0, failed = 0, pruned = 0, retimed = 0, empty = 0 }
+    local seen_book_ids = self.settings.dedupe_across_shelves and {} or nil
+    local totals = { downloaded = 0, skipped = 0, failed = 0, pruned = 0, retimed = 0, empty = 0, duplicates = 0 }
     local messages = {}
     for _, shelf in ipairs(selected_shelves) do
-        local result = self:syncOneShelf(shelf, read_ids)
+        local result = self:syncOneShelf(shelf, read_ids, seen_book_ids)
         for key, value in pairs(totals) do
             totals[key] = value + (result[key] or 0)
         end
@@ -878,8 +982,8 @@ function CwaMagicDownload:syncSelectedShelfNow()
 
     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
     self.is_syncing = false
-    local message = T(_("%1 shelves complete\nFilter: %2\nDownloaded: %3\nSkipped: %4\nRetimed: %5\nRemoved: %6\nEmpty: %7\nFailed: %8"),
-        #selected_shelves, getReadFilterById(read_filter).name, totals.downloaded, totals.skipped, totals.retimed, totals.pruned, totals.empty, totals.failed)
+    local message = T(_("%1 shelves complete\nDownloaded: %2\nSkipped: %3\nDuplicates: %4\nRetimed: %5\nRemoved: %6\nEmpty: %7\nFailed: %8"),
+        #selected_shelves, totals.downloaded, totals.skipped, totals.duplicates, totals.retimed, totals.pruned, totals.empty, totals.failed)
     if #messages > 0 then
         message = message .. "\n" .. table.concat(messages, "\n")
     end

@@ -12,7 +12,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.8.1",
+    version = "0.8.2",
     settings = nil,
     is_syncing = false,
 }
@@ -362,6 +362,11 @@ function CwaMagicDownload:migrateSelectedShelves()
     end
 end
 
+local function hasDiscoveredShelves(settings)
+    return (settings.available_shelves and #settings.available_shelves > 0)
+        or (settings.available_regular_shelves and #settings.available_regular_shelves > 0)
+end
+
 function CwaMagicDownload:getShelfFilter(shelf)
     return self.settings.shelf_filters
         and shelf
@@ -612,6 +617,10 @@ function CwaMagicDownload:getShelfFilterChoiceItems(shelf)
 end
 
 function CwaMagicDownload:getShelfFilterMenuItems()
+    if not hasDiscoveredShelves(self.settings) then
+        self:refreshShelfList(false)
+    end
+
     local function filterItems(shelves)
         local items = {}
         for _, shelf in ipairs(shelves) do
@@ -621,6 +630,18 @@ function CwaMagicDownload:getShelfFilterMenuItems()
                 end,
                 sub_item_table_func = function()
                     return self:getShelfFilterChoiceItems(shelf)
+                end,
+            })
+        end
+        if #items == 0 then
+            table.insert(items, {
+                text = _("No shelves found. Refresh shelf list from CWA."),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    self:refreshShelfList(true)
+                    if touchmenu_instance then
+                        touchmenu_instance:updateItems()
+                    end
                 end,
             })
         end
@@ -653,6 +674,10 @@ function CwaMagicDownload:getShelfFilterMenuItems()
 end
 
 function CwaMagicDownload:getShelfMenuItems()
+    if not hasDiscoveredShelves(self.settings) then
+        self:refreshShelfList(false)
+    end
+
     local function shelfItems(shelves)
         local items = {}
         for _, shelf in ipairs(shelves) do
@@ -669,6 +694,18 @@ function CwaMagicDownload:getShelfMenuItems()
                     self.settings.selected_shelves = self.settings.selected_shelves or {}
                     self.settings.selected_shelves[shelf.id] = not self.settings.selected_shelves[shelf.id]
                     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            })
+        end
+        if #items == 0 then
+            table.insert(items, {
+                text = _("No shelves found. Refresh shelf list from CWA."),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    self:refreshShelfList(true)
+                    if touchmenu_instance then
+                        touchmenu_instance:updateItems()
+                    end
                 end,
             })
         end

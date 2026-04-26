@@ -53,3 +53,8 @@ Set:
 - KOReader with plugin support.
 - A Calibre-Web-Automated instance with OPDS enabled.
 - Android builds need `/system/bin/curl` available for downloads.
+
+## License
+
+AGPL-3.0-or-later. KOReader itself is AGPL-3.0, so this plugin uses the same license family for community compatibility.
+

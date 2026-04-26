@@ -407,6 +407,12 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Per-shelf read filters"),
+                sub_item_table_func = function()
+                    return self:getShelfFilterMenuItems()
+                end,
+            },
+            {
                 text = _("Refresh shelf list from CWA"),
                 keep_menu_open = true,
                 callback = function(touchmenu_instance)
@@ -510,36 +516,77 @@ function CwaMagicDownload:addToMainMenu(menu_items)
     }
 end
 
-function CwaMagicDownload:getShelfMenuItems()
-    local function shelfFilterItems(shelf)
-        local items = {}
+function CwaMagicDownload:getShelfFilterChoiceItems(shelf)
+    local items = {}
+    table.insert(items, {
+        text_func = function()
+            return T(_("Use global default (%1)"), getReadFilterById(self.settings.read_filter).name)
+        end,
+        checked_func = function()
+            return not (self.settings.shelf_filters and self.settings.shelf_filters[shelf.id])
+        end,
+        callback = function()
+            self.settings.shelf_filters = self.settings.shelf_filters or {}
+            self.settings.shelf_filters[shelf.id] = nil
+            G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+        end,
+    })
+    for _, filter in ipairs(READ_FILTERS) do
         table.insert(items, {
-            text_func = function()
-                return T(_("Use global default (%1)"), getReadFilterById(self.settings.read_filter).name)
-            end,
+            text = filter.name,
             checked_func = function()
-                return not (self.settings.shelf_filters and self.settings.shelf_filters[shelf.id])
+                return self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] == filter.id
             end,
             callback = function()
-                self.settings.shelf_filters = self.settings.shelf_filters or {}
-                self.settings.shelf_filters[shelf.id] = nil
-                G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                self:setShelfFilter(shelf, filter.id)
             end,
         })
-        for _, filter in ipairs(READ_FILTERS) do
+    end
+    return items
+end
+
+function CwaMagicDownload:getShelfFilterMenuItems()
+    local function filterItems(shelves)
+        local items = {}
+        for _, shelf in ipairs(shelves) do
             table.insert(items, {
-                text = filter.name,
-                checked_func = function()
-                    return self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] == filter.id
+                text_func = function()
+                    return shelf.name .. ": " .. self:getShelfFilterLabel(shelf)
                 end,
-                callback = function()
-                    self:setShelfFilter(shelf, filter.id)
+                sub_item_table_func = function()
+                    return self:getShelfFilterChoiceItems(shelf)
                 end,
             })
         end
         return items
     end
 
+    return {
+        {
+            text = _("Magic shelves"),
+            sub_item_table_func = function()
+                local current_magic = self:groupShelvesForMenu()
+                return filterItems(current_magic)
+            end,
+        },
+        {
+            text = _("Regular shelves"),
+            sub_item_table_func = function()
+                local _, current_regular = self:groupShelvesForMenu()
+                return filterItems(current_regular)
+            end,
+        },
+        {
+            text = _("Built-in OPDS feeds"),
+            sub_item_table_func = function()
+                local _, _, current_builtin = self:groupShelvesForMenu()
+                return filterItems(current_builtin)
+            end,
+        },
+    }
+end
+
+function CwaMagicDownload:getShelfMenuItems()
     local function shelfItems(shelves)
         local items = {}
         for _, shelf in ipairs(shelves) do
@@ -552,31 +599,16 @@ function CwaMagicDownload:getShelfMenuItems()
                 checked_func = function()
                     return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
                 end,
-                sub_item_table = {
-                    {
-                        text = _("Sync this shelf"),
-                        checked_func = function()
-                            return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
-                        end,
-                        callback = function()
-                            self.settings.selected_shelves = self.settings.selected_shelves or {}
-                            self.settings.selected_shelves[shelf.id] = not self.settings.selected_shelves[shelf.id]
-                            G_reader_settings:saveSetting("cwamagicdownload", self.settings)
-                        end,
-                    },
-                    {
-                        text_func = function()
-                            return T(_("Read status filter: %1"), self:getShelfFilterLabel(shelf))
-                        end,
-                        sub_item_table = shelfFilterItems(shelf),
-                    },
-                },
+                callback = function()
+                    self.settings.selected_shelves = self.settings.selected_shelves or {}
+                    self.settings.selected_shelves[shelf.id] = not self.settings.selected_shelves[shelf.id]
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
             })
         end
         return items
     end
 
-    local magic, regular, builtin = self:groupShelvesForMenu()
     return {
         {
             text = _("Refresh shelf list from CWA"),

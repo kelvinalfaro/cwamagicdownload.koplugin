@@ -6,13 +6,14 @@ local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
+local socketutil = require("socketutil")
 local util = require("util")
 local T = require("ffi/util").template
 local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.0",
+    version = "0.9.1",
     settings = nil,
     is_syncing = false,
 }
@@ -130,28 +131,6 @@ local function findCurl()
         end
     end
     return nil
-end
-
-local function base64Encode(data)
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    local encoded = {}
-    local i = 1
-    while i <= #data do
-        local a = string.byte(data, i) or 0
-        local b = string.byte(data, i + 1) or 0
-        local c = string.byte(data, i + 2) or 0
-        local bitmap = a * 65536 + b * 256 + c
-        local c1 = math.floor(bitmap / 262144) % 64
-        local c2 = math.floor(bitmap / 4096) % 64
-        local c3 = math.floor(bitmap / 64) % 64
-        local c4 = bitmap % 64
-        table.insert(encoded, string.sub(chars, c1 + 1, c1 + 1))
-        table.insert(encoded, string.sub(chars, c2 + 1, c2 + 1))
-        table.insert(encoded, i + 1 <= #data and string.sub(chars, c3 + 1, c3 + 1) or "=")
-        table.insert(encoded, i + 2 <= #data and string.sub(chars, c4 + 1, c4 + 1) or "=")
-        i = i + 3
-    end
-    return table.concat(encoded)
 end
 
 local function decodeEntities(text)
@@ -886,14 +865,12 @@ function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
     local ltn12_ok, ltn12 = pcall(require, "ltn12")
     local http_ok, http = pcall(require, "socket.http")
     local https_ok, https = pcall(require, "ssl.https")
+    local socket_ok, socket = pcall(require, "socket")
     local client = url:match("^https://") and https or http
-    if not ltn12_ok or (url:match("^https://") and not https_ok) or (url:match("^http://") and not http_ok) then
+    if not ltn12_ok or not socket_ok or (url:match("^https://") and not https_ok) or (url:match("^http://") and not http_ok) then
         logger.warn("CWA Magic Downloads: no curl and Lua HTTP client unavailable", url)
         return false
     end
-
-    if http_ok and http.TIMEOUT then http.TIMEOUT = max_time or 120 end
-    if https_ok and https.TIMEOUT then https.TIMEOUT = max_time or 120 end
 
     local fh = io.open(out_file, "wb")
     if not fh then
@@ -901,19 +878,25 @@ function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
         return false
     end
 
-    local request_ok, ok, code = pcall(client.request, {
+    socketutil:set_timeout(max_time or socketutil.LARGE_BLOCK_TIMEOUT, max_time or socketutil.LARGE_TOTAL_TIMEOUT)
+    local request_ok, code, headers, status = pcall(function()
+        return socket.skip(1, client.request({
         url = url,
         method = "GET",
         headers = {
-            Authorization = "Basic " .. base64Encode(self:getAuth()),
+            ["Accept-Encoding"] = "identity",
         },
+        user = self.settings.username,
+        password = self.settings.password,
         sink = ltn12.sink.file(fh),
-    })
-    if request_ok and ok and tonumber(code) and tonumber(code) >= 200 and tonumber(code) < 300 then
+        }))
+    end)
+    socketutil:reset_timeout()
+    if request_ok and tonumber(code) and tonumber(code) >= 200 and tonumber(code) < 300 then
         return true
     end
     os.execute("rm -f " .. shellQuote(out_file))
-    logger.warn("CWA Magic Downloads: Lua HTTP fetch failed", url, request_ok and code or ok)
+    logger.warn("CWA Magic Downloads: Lua HTTP fetch failed", url, request_ok and code or status, headers)
     return false
 end
 

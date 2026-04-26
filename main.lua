@@ -361,6 +361,20 @@ function CwaMagicDownload:getShelfFilterLabel(shelf)
     return T(_("Default: %1"), filter.name)
 end
 
+function CwaMagicDownload:getShelfFilterShortLabel(shelf)
+    if self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] then
+        return getReadFilterById(self:getShelfFilter(shelf)).name
+    end
+    return _("Default")
+end
+
+function CwaMagicDownload:getShelfDisplayName(shelf)
+    local name = shelf.name or ""
+    name = name:gsub("%s*%((Magic)%)$", "")
+    name = name:gsub("%s*%((Regular)%)$", "")
+    return name
+end
+
 function CwaMagicDownload:groupShelvesForMenu()
     local magic, regular, builtin = {}, {}, {}
     for _, shelf in ipairs(allShelves(self.settings)) do
@@ -551,7 +565,7 @@ function CwaMagicDownload:getShelfFilterMenuItems()
         for _, shelf in ipairs(shelves) do
             table.insert(items, {
                 text_func = function()
-                    return shelf.name .. ": " .. self:getShelfFilterLabel(shelf)
+                    return self:getShelfDisplayName(shelf) .. ": " .. self:getShelfFilterShortLabel(shelf)
                 end,
                 sub_item_table_func = function()
                     return self:getShelfFilterChoiceItems(shelf)
@@ -594,7 +608,7 @@ function CwaMagicDownload:getShelfMenuItems()
                 text_func = function()
                     local checked = self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
                     local mark = checked and "[x] " or "[ ] "
-                    return mark .. shelf.name .. " (" .. self:getShelfFilterLabel(shelf) .. ")"
+                    return mark .. self:getShelfDisplayName(shelf)
                 end,
                 checked_func = function()
                     return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true

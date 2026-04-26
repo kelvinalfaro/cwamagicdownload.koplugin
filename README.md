@@ -6,7 +6,7 @@ The plugin can discover and sync:
 
 - Calibre-Web-Automated Magic Shelves from `/opds/magicshelfindex`
 - Regular shelves from `/opds/shelfindex`
-- Built-in OPDS feeds for unread books and recently added books
+- Built-in OPDS feeds for unread books, read books, and recently added books
 
 ## Install
 
@@ -38,6 +38,8 @@ Set:
 - `Refresh shelf list from CWA`: fetches live regular and magic shelves.
 - `Shelves to sync`: choose one or more shelves.
 - `Read status filter`: choose unread only, read only, or all books.
+- `Per-shelf read filters`: override the global read filter for a specific shelf or use that feed's default.
+- `Show shelf icons`: toggles leading emoji/icons in shelf names for devices that render them as `?`.
 - `Limit`: maximum matching books per selected shelf.
 - `Download folder`: defaults to KOReader's home folder.
 
@@ -47,6 +49,7 @@ Set:
 - Existing files are skipped.
 - Downloaded and skipped files are timestamped from CWA OPDS metadata when available, so KOReader date sorting can reflect CWA's added/updated date rather than download time.
 - `Remove books that no longer match` deletes files from the plugin's shelf folders when they no longer match the selected shelf and read-status filter.
+- The plugin looks for KOReader's bundled `curl` first, then Android/Linux system paths, then falls back to `curl` from `PATH`.
 
 ## Requirements
 

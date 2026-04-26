@@ -1,4 +1,5 @@
 local Dispatcher = require("dispatcher")
+local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
@@ -11,7 +12,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.8.0",
+    version = "0.8.1",
     settings = nil,
     is_syncing = false,
 }
@@ -22,12 +23,21 @@ local BUILTIN_SHELVES = {
         name = "Unread Books",
         path = "/opds/unreadbooks",
         folder = "Unread Books",
+        default_filter = "unread",
+    },
+    {
+        id = "builtin:/opds/readbooks",
+        name = "Read Books",
+        path = "/opds/readbooks",
+        folder = "Read Books",
+        default_filter = "read",
     },
     {
         id = "builtin:/opds/new",
         name = "OPDS Recently Added",
         path = "/opds/new",
         folder = "OPDS Recently Added",
+        default_filter = "all",
     },
 }
 
@@ -47,6 +57,7 @@ CwaMagicDownload.default_settings = {
     shelf_filters = nil,
     prune_unmatched = false,
     dedupe_across_shelves = true,
+    show_shelf_icons = false,
 }
 
 local READ_FILTERS = {
@@ -102,6 +113,23 @@ local function fileExists(path)
         return true
     end
     return false
+end
+
+local function findCurl()
+    local data_dir = DataStorage:getDataDir()
+    local koreader_root = data_dir and data_dir:gsub("/[^/]+$", "")
+    local candidates = {}
+    if koreader_root then
+        table.insert(candidates, joinPath(koreader_root, "curl"))
+    end
+    table.insert(candidates, "/system/bin/curl")
+    table.insert(candidates, "/usr/bin/curl")
+    for _, path in ipairs(candidates) do
+        if path and fileExists(path) then
+            return path
+        end
+    end
+    return "curl"
 end
 
 local function decodeEntities(text)
@@ -338,13 +366,14 @@ function CwaMagicDownload:getShelfFilter(shelf)
     return self.settings.shelf_filters
         and shelf
         and self.settings.shelf_filters[shelf.id]
+        or shelf and shelf.default_filter
         or self.settings.read_filter
         or "unread"
 end
 
 function CwaMagicDownload:setShelfFilter(shelf, filter)
     self.settings.shelf_filters = self.settings.shelf_filters or {}
-    if filter == self.settings.read_filter then
+    if not filter then
         self.settings.shelf_filters[shelf.id] = nil
     else
         self.settings.shelf_filters[shelf.id] = filter
@@ -358,12 +387,18 @@ function CwaMagicDownload:getShelfFilterLabel(shelf)
     if self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] then
         return filter.name
     end
-    return T(_("Default: %1"), filter.name)
+    if shelf and shelf.default_filter then
+        return T(_("Feed default: %1"), filter.name)
+    end
+    return T(_("Global default: %1"), filter.name)
 end
 
 function CwaMagicDownload:getShelfFilterShortLabel(shelf)
     if self.settings.shelf_filters and self.settings.shelf_filters[shelf.id] then
         return getReadFilterById(self:getShelfFilter(shelf)).name
+    end
+    if shelf and shelf.default_filter then
+        return _("Feed default")
     end
     return _("Default")
 end
@@ -372,6 +407,9 @@ function CwaMagicDownload:getShelfDisplayName(shelf)
     local name = shelf.name or ""
     name = name:gsub("%s*%((Magic)%)$", "")
     name = name:gsub("%s*%((Regular)%)$", "")
+    if not self.settings.show_shelf_icons then
+        name = name:gsub("^[^%w]+%s+", "")
+    end
     return name
 end
 
@@ -465,6 +503,17 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Show shelf icons"),
+                checked_func = function()
+                    return self.settings.show_shelf_icons
+                end,
+                help_text = _("When disabled, leading emoji/icons are hidden from shelf names because some devices render them as question marks."),
+                callback = function()
+                    self.settings.show_shelf_icons = not self.settings.show_shelf_icons
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            },
+            {
                 text = _("Sync when KOReader starts"),
                 checked_func = function()
                     return self.settings.auto_sync
@@ -534,6 +583,9 @@ function CwaMagicDownload:getShelfFilterChoiceItems(shelf)
     local items = {}
     table.insert(items, {
         text_func = function()
+            if shelf and shelf.default_filter then
+                return T(_("Use feed default (%1)"), getReadFilterById(shelf.default_filter).name)
+            end
             return T(_("Use global default (%1)"), getReadFilterById(self.settings.read_filter).name)
         end,
         checked_func = function()
@@ -753,7 +805,7 @@ end
 
 function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time)
     local cmd = table.concat({
-        "/system/bin/curl -fsSL",
+        shellQuote(findCurl()), "-fsSL",
         "--connect-timeout 20",
         "--max-time", tostring(max_time or 120),
         "-u", shellQuote(self:getAuth()),
@@ -937,7 +989,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
             local tmp_path = out_path .. ".part"
             local book_url = joinUrl(self.settings.server, book.href)
             local book_cmd = table.concat({
-                "/system/bin/curl -fsSL",
+                shellQuote(findCurl()), "-fsSL",
                 "--connect-timeout 20",
                 "--max-time 300",
                 "-u", shellQuote(self:getAuth()),

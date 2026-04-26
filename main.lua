@@ -12,7 +12,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.8.2",
+    version = "0.8.3",
     settings = nil,
     is_syncing = false,
 }
@@ -367,6 +367,10 @@ local function hasDiscoveredShelves(settings)
         or (settings.available_regular_shelves and #settings.available_regular_shelves > 0)
 end
 
+local function hasShelfGroup(shelves)
+    return shelves and #shelves > 0
+end
+
 function CwaMagicDownload:getShelfFilter(shelf)
     return self.settings.shelf_filters
         and shelf
@@ -653,6 +657,10 @@ function CwaMagicDownload:getShelfFilterMenuItems()
             text = _("Magic shelves"),
             sub_item_table_func = function()
                 local current_magic = self:groupShelvesForMenu()
+                if not hasShelfGroup(current_magic) then
+                    self:refreshShelfList(false)
+                    current_magic = self:groupShelvesForMenu()
+                end
                 return filterItems(current_magic)
             end,
         },
@@ -660,6 +668,10 @@ function CwaMagicDownload:getShelfFilterMenuItems()
             text = _("Regular shelves"),
             sub_item_table_func = function()
                 local _, current_regular = self:groupShelvesForMenu()
+                if not hasShelfGroup(current_regular) then
+                    self:refreshShelfList(false)
+                    _, current_regular = self:groupShelvesForMenu()
+                end
                 return filterItems(current_regular)
             end,
         },
@@ -729,6 +741,10 @@ function CwaMagicDownload:getShelfMenuItems()
             text = _("Magic shelves"),
             sub_item_table_func = function()
                 local current_magic = self:groupShelvesForMenu()
+                if not hasShelfGroup(current_magic) then
+                    self:refreshShelfList(false)
+                    current_magic = self:groupShelvesForMenu()
+                end
                 return shelfItems(current_magic)
             end,
         },
@@ -736,6 +752,10 @@ function CwaMagicDownload:getShelfMenuItems()
             text = _("Regular shelves"),
             sub_item_table_func = function()
                 local _, current_regular = self:groupShelvesForMenu()
+                if not hasShelfGroup(current_regular) then
+                    self:refreshShelfList(false)
+                    _, current_regular = self:groupShelvesForMenu()
+                end
                 return shelfItems(current_regular)
             end,
         },

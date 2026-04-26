@@ -1,0 +1,4 @@
+*.part
+*.tmp
+*.log
+settings*.lua

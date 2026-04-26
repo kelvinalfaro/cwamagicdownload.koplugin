@@ -12,7 +12,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.8.3",
+    version = "0.9.0",
     settings = nil,
     is_syncing = false,
 }
@@ -129,7 +129,29 @@ local function findCurl()
             return path
         end
     end
-    return "curl"
+    return nil
+end
+
+local function base64Encode(data)
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local encoded = {}
+    local i = 1
+    while i <= #data do
+        local a = string.byte(data, i) or 0
+        local b = string.byte(data, i + 1) or 0
+        local c = string.byte(data, i + 2) or 0
+        local bitmap = a * 65536 + b * 256 + c
+        local c1 = math.floor(bitmap / 262144) % 64
+        local c2 = math.floor(bitmap / 4096) % 64
+        local c3 = math.floor(bitmap / 64) % 64
+        local c4 = bitmap % 64
+        table.insert(encoded, string.sub(chars, c1 + 1, c1 + 1))
+        table.insert(encoded, string.sub(chars, c2 + 1, c2 + 1))
+        table.insert(encoded, i + 1 <= #data and string.sub(chars, c3 + 1, c3 + 1) or "=")
+        table.insert(encoded, i + 2 <= #data and string.sub(chars, c4 + 1, c4 + 1) or "=")
+        i = i + 3
+    end
+    return table.concat(encoded)
 end
 
 local function decodeEntities(text)
@@ -860,9 +882,48 @@ function CwaMagicDownload:getAuth()
     return (self.settings.username or "") .. ":" .. (self.settings.password or "")
 end
 
+function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
+    local ltn12_ok, ltn12 = pcall(require, "ltn12")
+    local http_ok, http = pcall(require, "socket.http")
+    local https_ok, https = pcall(require, "ssl.https")
+    local client = url:match("^https://") and https or http
+    if not ltn12_ok or (url:match("^https://") and not https_ok) or (url:match("^http://") and not http_ok) then
+        logger.warn("CWA Magic Downloads: no curl and Lua HTTP client unavailable", url)
+        return false
+    end
+
+    if http_ok and http.TIMEOUT then http.TIMEOUT = max_time or 120 end
+    if https_ok and https.TIMEOUT then https.TIMEOUT = max_time or 120 end
+
+    local fh = io.open(out_file, "wb")
+    if not fh then
+        logger.warn("CWA Magic Downloads: could not open output file", out_file)
+        return false
+    end
+
+    local request_ok, ok, code = pcall(client.request, {
+        url = url,
+        method = "GET",
+        headers = {
+            Authorization = "Basic " .. base64Encode(self:getAuth()),
+        },
+        sink = ltn12.sink.file(fh),
+    })
+    if request_ok and ok and tonumber(code) and tonumber(code) >= 200 and tonumber(code) < 300 then
+        return true
+    end
+    os.execute("rm -f " .. shellQuote(out_file))
+    logger.warn("CWA Magic Downloads: Lua HTTP fetch failed", url, request_ok and code or ok)
+    return false
+end
+
 function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time)
+    local curl = findCurl()
+    if not curl then
+        return self:fetchUrlToFileWithLua(url, out_file, max_time)
+    end
     local cmd = table.concat({
-        shellQuote(findCurl()), "-fsSL",
+        shellQuote(curl), "-fsSL",
         "--connect-timeout 20",
         "--max-time", tostring(max_time or 120),
         "-u", shellQuote(self:getAuth()),
@@ -1045,17 +1106,8 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
         else
             local tmp_path = out_path .. ".part"
             local book_url = joinUrl(self.settings.server, book.href)
-            local book_cmd = table.concat({
-                shellQuote(findCurl()), "-fsSL",
-                "--connect-timeout 20",
-                "--max-time 300",
-                "-u", shellQuote(self:getAuth()),
-                "-o", shellQuote(tmp_path),
-                shellQuote(book_url),
-                "&& mv", shellQuote(tmp_path), shellQuote(out_path),
-            }, " ")
-            local ok = os.execute(book_cmd)
-            if ok == true or ok == 0 then
+            if self:fetchUrlToFile(book_url, tmp_path, 300) then
+                os.execute("mv " .. shellQuote(tmp_path) .. " " .. shellQuote(out_path))
                 self:applyBookTimestamp(book, out_path)
                 downloaded = downloaded + 1
             else

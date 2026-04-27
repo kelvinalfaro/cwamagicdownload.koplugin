@@ -13,7 +13,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.1",
+    version = "0.9.2",
     settings = nil,
     is_syncing = false,
 }
@@ -97,6 +97,12 @@ local function joinPath(left, right)
     left = (left or ""):gsub("/+$", "")
     right = (right or ""):gsub("^/+", "")
     return left .. "/" .. right
+end
+
+local function isSafeChildPath(root, path)
+    root = (root or ""):gsub("/+$", "")
+    path = (path or ""):gsub("/+$", "")
+    return root ~= "" and root ~= "/" and path:sub(1, #root + 1) == root .. "/"
 end
 
 local function readFile(path)
@@ -1029,6 +1035,27 @@ function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
     return pruned
 end
 
+function CwaMagicDownload:pruneDeselectedShelfFolders()
+    if not self.settings.prune_unmatched then return 0 end
+    local selected = self.settings.selected_shelves or {}
+    local root = self.settings.download_root or getHomeDir()
+    local removed = 0
+
+    for _, shelf in ipairs(allShelves(self.settings)) do
+        if selected[shelf.id] == false then
+            local target_dir = joinPath(root, shelf.folder)
+            if isSafeChildPath(root, target_dir) then
+                os.execute("rm -rf " .. shellQuote(target_dir))
+                removed = removed + 1
+            else
+                logger.warn("CWA Magic Downloads: refused to remove unsafe shelf folder", target_dir)
+            end
+        end
+    end
+
+    return removed
+end
+
 function CwaMagicDownload:applyBookTimestamp(book, out_path)
     local touch_time = opdsTimestampToTouch(book.timestamp)
     if touch_time then
@@ -1101,7 +1128,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
         end
     end
 
-    if self.settings.prune_unmatched and (not seen_book_ids or (duplicates or 0) == 0) then
+    if self.settings.prune_unmatched then
         pruned = self:pruneUnmatchedFiles(target_dir, wanted_files)
     end
 
@@ -1158,7 +1185,7 @@ function CwaMagicDownload:syncSelectedShelfNow()
     end
 
     local seen_book_ids = self.settings.dedupe_across_shelves and {} or nil
-    local totals = { downloaded = 0, skipped = 0, failed = 0, pruned = 0, retimed = 0, empty = 0, duplicates = 0 }
+    local totals = { downloaded = 0, skipped = 0, failed = 0, pruned = 0, removed_folders = 0, retimed = 0, empty = 0, duplicates = 0 }
     local messages = {}
     for _, shelf in ipairs(selected_shelves) do
         local result = self:syncOneShelf(shelf, read_ids, seen_book_ids)
@@ -1169,11 +1196,12 @@ function CwaMagicDownload:syncSelectedShelfNow()
             table.insert(messages, shelf.name .. ": " .. result.message)
         end
     end
+    totals.removed_folders = self:pruneDeselectedShelfFolders()
 
     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
     self.is_syncing = false
-    local message = T(_("%1 shelves complete\nDownloaded: %2\nSkipped: %3\nDuplicates: %4\nRetimed: %5\nRemoved: %6\nEmpty: %7\nFailed: %8"),
-        #selected_shelves, totals.downloaded, totals.skipped, totals.duplicates, totals.retimed, totals.pruned, totals.empty, totals.failed)
+    local message = T(_("%1 shelves complete\nDownloaded: %2\nSkipped: %3\nDuplicates: %4\nRetimed: %5\nRemoved files: %6\nRemoved folders: %7\nEmpty: %8\nFailed: %9"),
+        #selected_shelves, totals.downloaded, totals.skipped, totals.duplicates, totals.retimed, totals.pruned, totals.removed_folders, totals.empty, totals.failed)
     if #messages > 0 then
         message = message .. "\n" .. table.concat(messages, "\n")
     end

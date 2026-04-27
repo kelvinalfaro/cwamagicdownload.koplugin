@@ -13,7 +13,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.3",
+    version = "0.9.4",
     settings = nil,
     is_syncing = false,
 }
@@ -194,6 +194,17 @@ end
 
 local function sidecarPathForBook(path)
     return (path or ""):gsub("%.[^%.%/]+$", ".sdr")
+end
+
+local function localBookIsComplete(path)
+    local sidecar_path = sidecarPathForBook(path)
+    if sidecar_path == path then return false end
+    local ext = (path or ""):match("%.([^%.%/]+)$")
+    if not ext then return false end
+    local metadata = readFile(joinPath(sidecar_path, "metadata." .. ext .. ".lua")) or ""
+    if metadata:match('%["status"%]%s*=%s*"complete"') then return true end
+    local percent = tonumber(metadata:match('%["percent_finished"%]%s*=%s*([%d%.]+)'))
+    return percent and percent >= 0.999
 end
 
 local function opdsTimestampToTouch(timestamp)
@@ -1108,8 +1119,26 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
     end
 
     local downloaded, skipped, failed, pruned, retimed = 0, 0, 0, 0, 0
+    local kept_books = {}
     local wanted_files = {}
     for _, book in ipairs(books) do
+        local filename = safeFilename(book.title, book.format)
+        local out_path = joinPath(target_dir, filename)
+        if self:getShelfFilter(shelf) == "unread" and localBookIsComplete(out_path) then
+            logger.dbg("CWA Magic Downloads: pruning locally completed unread-filtered book", out_path)
+        else
+            table.insert(kept_books, book)
+        end
+    end
+
+    if #kept_books == 0 then
+        if self.settings.prune_unmatched then
+            pruned = self:pruneUnmatchedFiles(target_dir, wanted_files)
+        end
+        return { empty = 1, pruned = pruned, folder = target_dir }
+    end
+
+    for _, book in ipairs(kept_books) do
         if seen_book_ids and book.id then
             seen_book_ids[book.id] = true
         end

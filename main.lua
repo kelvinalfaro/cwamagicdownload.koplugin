@@ -13,7 +13,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.2",
+    version = "0.9.3",
     settings = nil,
     is_syncing = false,
 }
@@ -190,6 +190,10 @@ end
 
 local function getBookIdFromHref(href)
     return (href or ""):match("/download/(%d+)/")
+end
+
+local function sidecarPathForBook(path)
+    return (path or ""):gsub("%.[^%.%/]+$", ".sdr")
 end
 
 local function opdsTimestampToTouch(timestamp)
@@ -1029,6 +1033,10 @@ function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
         local filename = path:match("([^/]+)$")
         if filename and not filename:match("%.part$") and not wanted_files[filename] then
             os.execute("rm -f " .. shellQuote(path))
+            local sidecar_path = sidecarPathForBook(path)
+            if sidecar_path ~= path and isSafeChildPath(target_dir, sidecar_path) then
+                os.execute("rm -rf " .. shellQuote(sidecar_path))
+            end
             pruned = pruned + 1
         end
     end

@@ -50,6 +50,7 @@ Set:
 - Downloaded and skipped files are timestamped from CWA OPDS metadata when available, so KOReader date sorting can reflect CWA's added/updated date rather than download time.
 - Temporary OPDS files are written under KOReader's own `cache` directory instead of an Android-specific app path, so Kindle/Tolino builds can write them too.
 - `Remove books that no longer match` deletes files from the plugin's shelf folders when they no longer match the selected shelf and read-status filter.
+- When shelf icons are hidden, shelf menu labels and local shelf folders use iconless names. Existing icon-prefixed folders are renamed during sync when possible.
 - For unread-filtered shelves, books marked complete in local KOReader metadata are treated as read and removed during cleanup even if CWA's OPDS read shelf has not updated.
 - When a book file is removed, its matching KOReader `.sdr` sidecar folder is removed too.
 - With `Remove books that no longer match` enabled, sync also removes folders for shelves that were previously selected and then explicitly unselected.

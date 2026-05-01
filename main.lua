@@ -28,7 +28,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.5",
+    version = "0.9.6",
     settings = nil,
     is_syncing = false,
     progress_widget = nil,
@@ -138,6 +138,11 @@ local function fileExists(path)
     return false
 end
 
+local function dirExists(path)
+    local ok = os.execute("[ -d " .. shellQuote(path) .. " ]")
+    return ok == true or ok == 0
+end
+
 local function getCacheDir()
     local data_dir = DataStorage:getDataDir()
     local cache_dir = data_dir and joinPath(data_dir, "cache") or "/tmp"
@@ -200,8 +205,17 @@ local function safeFilename(title, ext)
     return name .. "." .. ext
 end
 
+local function stripShelfIconPrefix(name)
+    name = decodeEntities(name or "")
+    name = name:gsub("%s*%((Magic)%)$", "")
+    name = name:gsub("%s*%((Regular)%)$", "")
+    name = name:gsub("^[^%w]+%s*", "")
+    return trim(name)
+end
+
 local function safeFolderName(title)
     local name = decodeEntities(title or "")
+    name = stripShelfIconPrefix(name)
     name = name:gsub("%s*%b()%s*$", "")
     name = name:gsub("[/\\:*?\"<>|%c]", " ")
     name = name:gsub("%s+", " ")
@@ -462,13 +476,28 @@ function CwaMagicDownload:getShelfFilterShortLabel(shelf)
 end
 
 function CwaMagicDownload:getShelfDisplayName(shelf)
-    local name = shelf.name or ""
-    name = name:gsub("%s*%((Magic)%)$", "")
-    name = name:gsub("%s*%((Regular)%)$", "")
+    local name = stripShelfIconPrefix(shelf.name)
     if not self.settings.show_shelf_icons then
-        name = name:gsub("^[^%w]+%s+", "")
+        return name
     end
-    return name
+    return (shelf.name or ""):gsub("%s*%((Magic)%)$", ""):gsub("%s*%((Regular)%)$", "")
+end
+
+function CwaMagicDownload:getShelfFolderName(shelf)
+    if not self.settings.show_shelf_icons then
+        return safeFolderName(self:getShelfDisplayName(shelf))
+    end
+    return shelf.folder or safeFolderName(shelf.name)
+end
+
+function CwaMagicDownload:migrateIconShelfFolder(root, shelf, target_dir)
+    if self.settings.show_shelf_icons or not shelf.folder then return end
+    local old_dir = joinPath(root, shelf.folder)
+    if old_dir == target_dir then return end
+    if not isSafeChildPath(root, old_dir) or not isSafeChildPath(root, target_dir) then return end
+    if dirExists(old_dir) and not dirExists(target_dir) then
+        os.execute("mv " .. shellQuote(old_dir) .. " " .. shellQuote(target_dir))
+    end
 end
 
 function CwaMagicDownload:groupShelvesForMenu()
@@ -822,7 +851,9 @@ function CwaMagicDownload:getFlatShelfMenuItems()
     local items = {}
     for _, shelf in ipairs(allShelves(self.settings)) do
         table.insert(items, {
-            text = shelf.name,
+            text_func = function()
+                return self:getShelfDisplayName(shelf)
+            end,
             checked_func = function()
                 return self.settings.selected_shelves and self.settings.selected_shelves[shelf.id] == true
             end,
@@ -1163,7 +1194,7 @@ function CwaMagicDownload:pruneDeselectedShelfFolders()
 
     for _, shelf in ipairs(allShelves(self.settings)) do
         if selected[shelf.id] == false then
-            local target_dir = joinPath(root, shelf.folder)
+            local target_dir = joinPath(root, self:getShelfFolderName(shelf))
             if isSafeChildPath(root, target_dir) then
                 os.execute("rm -rf " .. shellQuote(target_dir))
                 removed = removed + 1
@@ -1208,7 +1239,8 @@ end
 
 function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progress)
     local root = self.settings.download_root or getHomeDir()
-    local target_dir = joinPath(root, shelf.folder)
+    local target_dir = joinPath(root, self:getShelfFolderName(shelf))
+    self:migrateIconShelfFolder(root, shelf, target_dir)
     os.execute("mkdir -p " .. shellQuote(target_dir))
 
     local books, err, duplicates = self:collectShelfBooks(shelf, read_ids, seen_book_ids)

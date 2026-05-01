@@ -28,7 +28,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.6",
+    version = "0.9.7",
     settings = nil,
     is_syncing = false,
     progress_widget = nil,
@@ -136,6 +136,11 @@ local function fileExists(path)
         return true
     end
     return false
+end
+
+local function pathExists(path)
+    local ok = os.execute("[ -e " .. shellQuote(path) .. " ]")
+    return ok == true or ok == 0
 end
 
 local function dirExists(path)
@@ -495,9 +500,44 @@ function CwaMagicDownload:migrateIconShelfFolder(root, shelf, target_dir)
     local old_dir = joinPath(root, shelf.folder)
     if old_dir == target_dir then return end
     if not isSafeChildPath(root, old_dir) or not isSafeChildPath(root, target_dir) then return end
-    if dirExists(old_dir) and not dirExists(target_dir) then
+    if not dirExists(old_dir) then return end
+    if not dirExists(target_dir) then
         os.execute("mv " .. shellQuote(old_dir) .. " " .. shellQuote(target_dir))
+        return
     end
+
+    local list_file = cachePath("folder-merge.txt")
+    os.execute("find " .. shellQuote(old_dir) .. " -mindepth 1 -maxdepth 1 > " .. shellQuote(list_file))
+    local paths = readFile(list_file) or ""
+    for source_path in paths:gmatch("[^\r\n]+") do
+        local name = source_path:match("([^/]+)$")
+        local dest_path = name and joinPath(target_dir, name)
+        if dest_path and not pathExists(dest_path) then
+            os.execute("mv " .. shellQuote(source_path) .. " " .. shellQuote(dest_path))
+        end
+    end
+    os.execute("rmdir " .. shellQuote(old_dir) .. " 2>/dev/null")
+end
+
+function CwaMagicDownload:ensureExistingBookInCurrentFolder(root, shelf, target_dir, filename)
+    if self.settings.show_shelf_icons or not shelf.folder then return false end
+    local old_dir = joinPath(root, shelf.folder)
+    if old_dir == target_dir or not dirExists(old_dir) then return false end
+    if not isSafeChildPath(root, old_dir) or not isSafeChildPath(root, target_dir) then return false end
+
+    local old_path = joinPath(old_dir, filename)
+    if not fileExists(old_path) then return false end
+
+    local target_path = joinPath(target_dir, filename)
+    if not fileExists(target_path) then
+        os.execute("mv " .. shellQuote(old_path) .. " " .. shellQuote(target_path))
+        local old_sidecar = sidecarPathForBook(old_path)
+        local target_sidecar = sidecarPathForBook(target_path)
+        if dirExists(old_sidecar) and not dirExists(target_sidecar) then
+            os.execute("mv " .. shellQuote(old_sidecar) .. " " .. shellQuote(target_sidecar))
+        end
+    end
+    return true
 end
 
 function CwaMagicDownload:groupShelvesForMenu()
@@ -1279,6 +1319,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
         wanted_files[filename] = true
         local out_path = joinPath(target_dir, filename)
         local already_exists = fileExists(out_path)
+            or self:ensureExistingBookInCurrentFolder(root, shelf, target_dir, filename)
         if on_progress then
             on_progress(i, #kept_books, book.title, not already_exists)
         end

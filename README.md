@@ -48,11 +48,13 @@ Set:
 - Files are downloaded into one subfolder per selected shelf.
 - Existing files are skipped.
 - Downloaded and skipped files are timestamped from CWA OPDS metadata when available, so KOReader date sorting can reflect CWA's added/updated date rather than download time.
+- Temporary OPDS files are written under KOReader's own `cache` directory instead of an Android-specific app path, so Kindle/Tolino builds can write them too.
 - `Remove books that no longer match` deletes files from the plugin's shelf folders when they no longer match the selected shelf and read-status filter.
 - For unread-filtered shelves, books marked complete in local KOReader metadata are treated as read and removed during cleanup even if CWA's OPDS read shelf has not updated.
 - When a book file is removed, its matching KOReader `.sdr` sidecar folder is removed too.
 - With `Remove books that no longer match` enabled, sync also removes folders for shelves that were previously selected and then explicitly unselected.
-- The plugin looks for KOReader's bundled `curl` first, then Android/Linux system paths. If no `curl` binary exists, it falls back to KOReader's LuaSocket/LuaSec HTTP stack.
+- The plugin uses KOReader's LuaSocket/LuaSec HTTP stack first, then falls back to KOReader/system `curl` when available.
+- A progress dialog is shown during shelf sync so long downloads no longer look frozen.
 - If no live CWA shelves are cached yet, opening the shelf menus will refresh the list automatically.
 
 ## Requirements

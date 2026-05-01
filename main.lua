@@ -5,6 +5,21 @@ local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local function optionalRequire(name)
+    local ok, mod = pcall(require, name)
+    if ok then return mod end
+    return nil
+end
+local CenterContainer = optionalRequire("ui/widget/container/centercontainer")
+local FrameContainer = optionalRequire("ui/widget/container/framecontainer")
+local VerticalGroup = optionalRequire("ui/widget/verticalgroup")
+local VerticalSpan = optionalRequire("ui/widget/verticalspan")
+local TextBoxWidget = optionalRequire("ui/widget/textboxwidget")
+local ProgressWidget = optionalRequire("ui/widget/progresswidget")
+local Blitbuffer = optionalRequire("ffi/blitbuffer")
+local Font = optionalRequire("ui/font")
+local Size = optionalRequire("ui/size")
+local Device = optionalRequire("device")
 local logger = require("logger")
 local socketutil = require("socketutil")
 local util = require("util")
@@ -13,9 +28,10 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.4",
+    version = "0.9.5",
     settings = nil,
     is_syncing = false,
+    progress_widget = nil,
 }
 
 local BUILTIN_SHELVES = {
@@ -122,6 +138,17 @@ local function fileExists(path)
     return false
 end
 
+local function getCacheDir()
+    local data_dir = DataStorage:getDataDir()
+    local cache_dir = data_dir and joinPath(data_dir, "cache") or "/tmp"
+    os.execute("mkdir -p " .. shellQuote(cache_dir))
+    return cache_dir
+end
+
+local function cachePath(name)
+    return joinPath(getCacheDir(), "cwamagicdownload-" .. name)
+end
+
 local function findCurl()
     local data_dir = DataStorage:getDataDir()
     local koreader_root = data_dir and data_dir:gsub("/[^/]+$", "")
@@ -210,7 +237,7 @@ end
 local function opdsTimestampToTouch(timestamp)
     local year, month, day, hour, min, sec = (timestamp or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
     if not year then return nil end
-    return ("%s%s%s%s%s.%s"):format(year, month, day, hour, min, sec)
+    return ("%s%s%s.%s%s%s"):format(year, month, day, hour, min, sec)
 end
 
 local function chooseLink(links, format_order)
@@ -878,6 +905,75 @@ function CwaMagicDownload:showMessage(text, timeout)
     })
 end
 
+function CwaMagicDownload:showProgress(text, pct)
+    if not (CenterContainer and FrameContainer and VerticalGroup and VerticalSpan
+            and TextBoxWidget and ProgressWidget and Blitbuffer and Font and Size
+            and Device and Device.screen) then
+        self:showMessage(text, 3)
+        return
+    end
+
+    if self.progress_widget then
+        UIManager:close(self.progress_widget)
+        self.progress_widget = nil
+    end
+
+    local ok, widget = pcall(function()
+        local screen = Device.screen
+        local dialog_width = math.floor(screen:getWidth() * 0.82)
+        local inner_width = dialog_width - 2 * Size.padding.large
+        local bar_height = screen:scaleBySize(18)
+
+        local content = VerticalGroup:new{
+            align = "left",
+            TextBoxWidget:new{
+                text = text or "",
+                width = inner_width,
+                face = Font:getFace("cfont", 22),
+            },
+            VerticalSpan:new{ height = Size.padding.default },
+            ProgressWidget:new{
+                width = inner_width,
+                height = bar_height,
+                percentage = pct or 0,
+                bordercolor = Blitbuffer.COLOR_BLACK,
+                bgcolor = Blitbuffer.COLOR_WHITE,
+                fillcolor = Blitbuffer.COLOR_DARK_GRAY,
+            },
+        }
+
+        local frame = FrameContainer:new{
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = Size.border.window,
+            radius = Size.radius.window,
+            padding = Size.padding.large,
+            content,
+        }
+
+        return CenterContainer:new{
+            dimen = screen:getSize(),
+            frame,
+        }
+    end)
+
+    if not ok then
+        logger.warn("CWA Magic Downloads: progress widget failed", widget)
+        self:showMessage(text, 3)
+        return
+    end
+
+    self.progress_widget = widget
+    UIManager:show(self.progress_widget)
+    UIManager:forceRePaint()
+end
+
+function CwaMagicDownload:closeProgress()
+    if self.progress_widget then
+        UIManager:close(self.progress_widget)
+        self.progress_widget = nil
+    end
+end
+
 function CwaMagicDownload:getAuth()
     return (self.settings.username or "") .. ":" .. (self.settings.password or "")
 end
@@ -922,10 +1018,15 @@ function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
 end
 
 function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time)
+    if self:fetchUrlToFileWithLua(url, out_file, max_time) then
+        return true
+    end
+
     local curl = findCurl()
     if not curl then
-        return self:fetchUrlToFileWithLua(url, out_file, max_time)
+        return false
     end
+
     local cmd = table.concat({
         shellQuote(curl), "-fsSL",
         "--connect-timeout 20",
@@ -947,8 +1048,8 @@ function CwaMagicDownload:refreshShelfList(show_result)
         return true
     end
 
-    local magic_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-magic-shelves.xml"
-    local regular_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-regular-shelves.xml"
+    local magic_file = cachePath("magic-shelves.xml")
+    local regular_file = cachePath("regular-shelves.xml")
     local magic_url = joinUrl(self.settings.server, "/opds/magicshelfindex")
     local regular_url = joinUrl(self.settings.server, "/opds/shelfindex")
     if not self:fetchUrlToFile(magic_url, magic_file, 120) then
@@ -982,7 +1083,7 @@ function CwaMagicDownload:loadReadIds()
     local read_ids = {}
     local next_path = "/opds/readbooks"
     local page = 0
-    local feed_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-read.xml"
+    local feed_file = cachePath("read.xml")
 
     while next_path and page < 100 do
         page = page + 1
@@ -1006,7 +1107,7 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
     local limit = self.settings.limit or 25
     local next_path = shelf.path
     local page = 0
-    local feed_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-feed.xml"
+    local feed_file = cachePath("feed.xml")
     local read_filter = self:getShelfFilter(shelf)
     local duplicate_count = 0
 
@@ -1036,7 +1137,7 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
 end
 
 function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
-    local list_file = "/data/data/org.koreader.launcher/cache/cwamagicdownload-files.txt"
+    local list_file = cachePath("files.txt")
     os.execute("find " .. shellQuote(target_dir) .. " -maxdepth 1 -type f > " .. shellQuote(list_file))
     local files = readFile(list_file) or ""
     local pruned = 0
@@ -1091,21 +1192,21 @@ function CwaMagicDownload:syncSelectedShelf()
     end
     self.is_syncing = true
     local count = selectedShelfCount(self.settings)
-    self:showMessage(T(_("Syncing %1 shelves\nPlease wait. KOReader may not respond until this finishes."),
-        count), 120)
+    self:showProgress(T(_("Syncing %1 shelves\nPreparing..."), count), 0)
     UIManager:scheduleIn(0.25, function()
         local ok, err = pcall(function()
             self:syncSelectedShelfNow()
         end)
         if not ok then
             self.is_syncing = false
+            self:closeProgress()
             logger.warn("CWA Magic Downloads: sync failed unexpectedly", err)
             self:showMessage(_("CWA Magic Downloads failed. Check the KOReader log for details."), 8)
         end
     end)
 end
 
-function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
+function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progress)
     local root = self.settings.download_root or getHomeDir()
     local target_dir = joinPath(root, shelf.folder)
     os.execute("mkdir -p " .. shellQuote(target_dir))
@@ -1138,14 +1239,18 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids)
         return { empty = 1, pruned = pruned, folder = target_dir }
     end
 
-    for _, book in ipairs(kept_books) do
+    for i, book in ipairs(kept_books) do
         if seen_book_ids and book.id then
             seen_book_ids[book.id] = true
         end
         local filename = safeFilename(book.title, book.format)
         wanted_files[filename] = true
         local out_path = joinPath(target_dir, filename)
-        if fileExists(out_path) then
+        local already_exists = fileExists(out_path)
+        if on_progress then
+            on_progress(i, #kept_books, book.title, not already_exists)
+        end
+        if already_exists then
             if self:applyBookTimestamp(book, out_path) then
                 retimed = retimed + 1
             end
@@ -1183,14 +1288,17 @@ end
 function CwaMagicDownload:syncSelectedShelfNow()
     if NetworkMgr:willRerunWhenOnline(function() self:syncSelectedShelf() end) then
         self.is_syncing = false
+        self:closeProgress()
         return
     end
     if not self.settings.password or not self.settings.username or not self.settings.server then
+        self:closeProgress()
         self:showMessage(_("Set the CWA server login first."))
         self.is_syncing = false
         return
     end
 
+    self:showProgress(_("Refreshing shelf list..."), 0)
     self:refreshShelfList(false)
     local selected_shelves = {}
     for _, shelf in ipairs(allShelves(self.settings)) do
@@ -1199,6 +1307,7 @@ function CwaMagicDownload:syncSelectedShelfNow()
         end
     end
     if #selected_shelves == 0 then
+        self:closeProgress()
         self:showMessage(_("Select at least one shelf to sync."))
         self.is_syncing = false
         return
@@ -1213,8 +1322,10 @@ function CwaMagicDownload:syncSelectedShelfNow()
         end
     end
     if needs_read_ids then
+        self:showProgress(_("Fetching read status..."), 0.03)
         read_ids = self:loadReadIds()
         if not read_ids then
+            self:closeProgress()
             self:showMessage(_("Could not fetch read status. Check Wi-Fi and login."))
             self.is_syncing = false
             return
@@ -1224,19 +1335,36 @@ function CwaMagicDownload:syncSelectedShelfNow()
     local seen_book_ids = self.settings.dedupe_across_shelves and {} or nil
     local totals = { downloaded = 0, skipped = 0, failed = 0, pruned = 0, removed_folders = 0, retimed = 0, empty = 0, duplicates = 0 }
     local messages = {}
-    for _, shelf in ipairs(selected_shelves) do
-        local result = self:syncOneShelf(shelf, read_ids, seen_book_ids)
+    local total_shelves = #selected_shelves
+    for si, shelf in ipairs(selected_shelves) do
+        local shelf_base = 0.06 + (si - 1) / total_shelves * 0.94
+        local shelf_top = 0.06 + si / total_shelves * 0.94
+        local shelf_name = self:getShelfDisplayName(shelf)
+
+        self:showProgress(T(_("Shelf %1 / %2: %3\nFetching book list..."), si, total_shelves, shelf_name), shelf_base)
+
+        local result = self:syncOneShelf(shelf, read_ids, seen_book_ids, function(bi, total_books, title, is_downloading)
+            local book_pct = shelf_base + (bi / total_books) * (shelf_top - shelf_base)
+            local short_title = #title > 38 and (title:sub(1, 35) .. "...") or title
+            local action = is_downloading and _("Downloading") or _("Already present")
+            self:showProgress(
+                T(_("Shelf %1 / %2: %3\n%4 %5 / %6\n%7"),
+                    si, total_shelves, shelf_name, action, bi, total_books, short_title),
+                book_pct)
+        end)
         for key, value in pairs(totals) do
             totals[key] = value + (result[key] or 0)
         end
         if result.message then
-            table.insert(messages, shelf.name .. ": " .. result.message)
+            table.insert(messages, shelf_name .. ": " .. result.message)
         end
     end
+    self:showProgress(_("Finishing up..."), 0.99)
     totals.removed_folders = self:pruneDeselectedShelfFolders()
 
     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
     self.is_syncing = false
+    self:closeProgress()
     local message = T(_("%1 shelves complete\nDownloaded: %2\nSkipped: %3\nDuplicates: %4\nRetimed: %5\nRemoved files: %6\nRemoved folders: %7\nEmpty: %8\nFailed: %9"),
         #selected_shelves, totals.downloaded, totals.skipped, totals.duplicates, totals.retimed, totals.pruned, totals.removed_folders, totals.empty, totals.failed)
     if #messages > 0 then

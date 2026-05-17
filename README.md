@@ -40,6 +40,8 @@ Set:
 - `Read status filter`: choose unread only, read only, or all books.
 - `Per-shelf read filters`: override the global read filter for a specific shelf or use that feed's default.
 - `Show shelf icons`: toggles leading emoji/icons in shelf names for devices that render them as `?`.
+- `Check for plugin update`: checks GitHub for a newer release and installs it into this plugin folder after confirmation.
+- `Check for updates when KOReader starts`: checks GitHub at most once per day and prompts when a newer version is available.
 - `Limit`: maximum matching books per selected shelf.
 - `Download folder`: defaults to KOReader's home folder.
 
@@ -55,6 +57,7 @@ Set:
 - When a book file is removed, its matching KOReader `.sdr` sidecar folder is removed too.
 - With `Remove books that no longer match` enabled, sync also removes folders for shelves that were previously selected and then explicitly unselected.
 - The plugin uses KOReader's LuaSocket/LuaSec HTTP stack first, then falls back to KOReader/system `curl` when available.
+- Self-update downloads the latest plugin files from the GitHub `main` branch, installs them over the current plugin folder, and requires a KOReader restart before the new code is loaded.
 - A progress dialog is shown during shelf sync so long downloads no longer look frozen.
 - If no live CWA shelves are cached yet, opening the shelf menus will refresh the list automatically.
 

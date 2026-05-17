@@ -10,6 +10,7 @@ local function optionalRequire(name)
     if ok then return mod end
     return nil
 end
+local ConfirmBox = optionalRequire("ui/widget/confirmbox")
 local CenterContainer = optionalRequire("ui/widget/container/centercontainer")
 local FrameContainer = optionalRequire("ui/widget/container/framecontainer")
 local VerticalGroup = optionalRequire("ui/widget/verticalgroup")
@@ -28,7 +29,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.7",
+    version = "0.9.8",
     settings = nil,
     is_syncing = false,
     progress_widget = nil,
@@ -75,6 +76,16 @@ CwaMagicDownload.default_settings = {
     prune_unmatched = false,
     dedupe_across_shelves = true,
     show_shelf_icons = false,
+    auto_check_updates = true,
+    last_update_check = nil,
+}
+
+local UPDATE_REPO_RAW = "https://raw.githubusercontent.com/kelvinalfaro/cwamagicdownload.koplugin/main"
+local UPDATE_FILES = {
+    "main.lua",
+    "_meta.lua",
+    "README.md",
+    "LICENSE",
 }
 
 local READ_FILTERS = {
@@ -109,10 +120,39 @@ local function joinUrl(base, path)
     return base .. path
 end
 
+local function getPluginDir()
+    local source = debug.getinfo(1, "S").source or ""
+    source = source:gsub("^@", "")
+    return source:match("(.+)/main%.lua$") or "."
+end
+
 local function joinPath(left, right)
     left = (left or ""):gsub("/+$", "")
     right = (right or ""):gsub("^/+", "")
     return left .. "/" .. right
+end
+
+local function parseVersion(text)
+    return (text or ""):match('version%s*=%s*"([%d%.]+)"')
+end
+
+local function compareVersions(left, right)
+    local function parts(version)
+        local values = {}
+        for part in tostring(version or ""):gmatch("(%d+)") do
+            table.insert(values, tonumber(part) or 0)
+        end
+        return values
+    end
+    local a, b = parts(left), parts(right)
+    local max = math.max(#a, #b)
+    for i = 1, max do
+        local av, bv = a[i] or 0, b[i] or 0
+        if av ~= bv then
+            return av > bv and 1 or -1
+        end
+    end
+    return 0
 end
 
 local function isSafeChildPath(root, path)
@@ -405,6 +445,11 @@ function CwaMagicDownload:init()
             self:syncSelectedShelf()
         end)
     end
+    if self.settings.auto_check_updates then
+        UIManager:scheduleIn(12, function()
+            self:checkForUpdate(false)
+        end)
+    end
 end
 
 function CwaMagicDownload:migrateSelectedShelves()
@@ -647,6 +692,23 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 end,
                 callback = function()
                     self.settings.auto_sync = not self.settings.auto_sync
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            },
+            {
+                text = _("Check for plugin update"),
+                keep_menu_open = true,
+                callback = function()
+                    self:checkForUpdate(true)
+                end,
+            },
+            {
+                text = _("Check for updates when KOReader starts"),
+                checked_func = function()
+                    return self.settings.auto_check_updates
+                end,
+                callback = function()
+                    self.settings.auto_check_updates = not self.settings.auto_check_updates
                     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
                 end,
             },
@@ -1049,7 +1111,7 @@ function CwaMagicDownload:getAuth()
     return (self.settings.username or "") .. ":" .. (self.settings.password or "")
 end
 
-function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
+function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time, no_auth)
     local ltn12_ok, ltn12 = pcall(require, "ltn12")
     local http_ok, http = pcall(require, "socket.http")
     local https_ok, https = pcall(require, "ssl.https")
@@ -1066,18 +1128,22 @@ function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
         return false
     end
 
-    socketutil:set_timeout(max_time or socketutil.LARGE_BLOCK_TIMEOUT, max_time or socketutil.LARGE_TOTAL_TIMEOUT)
-    local request_ok, code, headers, status = pcall(function()
-        return socket.skip(1, client.request({
+    local request = {
         url = url,
         method = "GET",
         headers = {
             ["Accept-Encoding"] = "identity",
         },
-        user = self.settings.username,
-        password = self.settings.password,
         sink = ltn12.sink.file(fh),
-        }))
+    }
+    if not no_auth then
+        request.user = self.settings.username
+        request.password = self.settings.password
+    end
+
+    socketutil:set_timeout(max_time or socketutil.LARGE_BLOCK_TIMEOUT, max_time or socketutil.LARGE_TOTAL_TIMEOUT)
+    local request_ok, code, headers, status = pcall(function()
+        return socket.skip(1, client.request(request))
     end)
     socketutil:reset_timeout()
     if request_ok and tonumber(code) and tonumber(code) >= 200 and tonumber(code) < 300 then
@@ -1088,8 +1154,8 @@ function CwaMagicDownload:fetchUrlToFileWithLua(url, out_file, max_time)
     return false
 end
 
-function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time)
-    if self:fetchUrlToFileWithLua(url, out_file, max_time) then
+function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time, no_auth)
+    if self:fetchUrlToFileWithLua(url, out_file, max_time, no_auth) then
         return true
     end
 
@@ -1098,16 +1164,151 @@ function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time)
         return false
     end
 
-    local cmd = table.concat({
+    local parts = {
         shellQuote(curl), "-fsSL",
         "--connect-timeout 20",
         "--max-time", tostring(max_time or 120),
-        "-u", shellQuote(self:getAuth()),
         "-o", shellQuote(out_file),
-        shellQuote(url),
-    }, " ")
+    }
+    if not no_auth then
+        table.insert(parts, "-u")
+        table.insert(parts, shellQuote(self:getAuth()))
+    end
+    table.insert(parts, shellQuote(url))
+    local cmd = table.concat(parts, " ")
     local ok = os.execute(cmd)
     return ok == true or ok == 0
+end
+
+function CwaMagicDownload:updateUrl(file)
+    return UPDATE_REPO_RAW .. "/" .. file
+end
+
+function CwaMagicDownload:downloadUpdateFile(file, out_dir)
+    local out_file = joinPath(out_dir, file)
+    os.execute("mkdir -p " .. shellQuote(out_file:gsub("/[^/]+$", "")))
+    if self:fetchUrlToFile(self:updateUrl(file), out_file, 120, true) then
+        return out_file
+    end
+    return nil
+end
+
+function CwaMagicDownload:downloadUpdateManifest()
+    local update_dir = cachePath("update")
+    os.execute("rm -rf " .. shellQuote(update_dir))
+    os.execute("mkdir -p " .. shellQuote(update_dir))
+
+    local main_file = self:downloadUpdateFile("main.lua", update_dir)
+    if not main_file then
+        return nil, _("Could not download the GitHub update metadata.")
+    end
+
+    local latest_version = parseVersion(readFile(main_file))
+    if not latest_version then
+        return nil, _("The GitHub update metadata did not include a plugin version.")
+    end
+
+    return {
+        dir = update_dir,
+        latest_version = latest_version,
+    }
+end
+
+function CwaMagicDownload:downloadUpdateFiles(update)
+    for _, file in ipairs(UPDATE_FILES) do
+        if file ~= "main.lua" and not self:downloadUpdateFile(file, update.dir) then
+            return false, T(_("Could not download update file: %1"), file)
+        end
+    end
+    return true
+end
+
+function CwaMagicDownload:installDownloadedUpdate(update)
+    local plugin_dir = getPluginDir()
+    if plugin_dir == "." or plugin_dir == "" then
+        return false, _("Could not find the plugin install folder.")
+    end
+
+    local current_main = joinPath(plugin_dir, "main.lua")
+    if not fileExists(current_main) then
+        return false, _("Could not verify the plugin install folder.")
+    end
+
+    for _, file in ipairs(UPDATE_FILES) do
+        local src = joinPath(update.dir, file)
+        local dst = joinPath(plugin_dir, file)
+        if not fileExists(src) then
+            return false, T(_("Missing downloaded update file: %1"), file)
+        end
+        local ok = os.execute("cp " .. shellQuote(src) .. " " .. shellQuote(dst))
+        if not (ok == true or ok == 0) then
+            return false, T(_("Could not install update file: %1"), file)
+        end
+    end
+
+    return true
+end
+
+function CwaMagicDownload:confirmAndInstallUpdate(update)
+    if not ConfirmBox then
+        self:showMessage(_("Update confirmation is unavailable on this KOReader build."), 8)
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = T(_("CWA Magic Downloads %1 is available.\nCurrent version: %2\n\nInstall it now?"),
+            update.latest_version, self.version),
+        ok_text = _("Install"),
+        cancel_text = _("Cancel"),
+        ok_callback = function()
+            self:showMessage(_("Installing CWA Magic Downloads update..."), 3)
+            local ok, err = self:downloadUpdateFiles(update)
+            if ok then
+                ok, err = self:installDownloadedUpdate(update)
+            end
+            if ok then
+                self.settings.last_update_check = os.time()
+                G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                self:showMessage(T(_("CWA Magic Downloads was updated to %1.\nRestart KOReader to load the new version."),
+                    update.latest_version), 12)
+            else
+                self:showMessage(err or _("CWA Magic Downloads update failed."), 8)
+            end
+        end,
+    })
+end
+
+function CwaMagicDownload:checkForUpdate(show_result)
+    if not show_result and self.settings.last_update_check
+            and os.time() - self.settings.last_update_check < 24 * 60 * 60 then
+        return true
+    end
+
+    if NetworkMgr:willRerunWhenOnline(function() self:checkForUpdate(show_result) end) then
+        return true
+    end
+
+    if show_result then
+        self:showMessage(_("Checking GitHub for CWA Magic Downloads updates..."), 3)
+    end
+
+    local update, err = self:downloadUpdateManifest()
+    if not update then
+        if show_result then self:showMessage(err or _("Could not check for updates."), 8) end
+        return false
+    end
+
+    self.settings.last_update_check = os.time()
+    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+
+    if compareVersions(update.latest_version, self.version) <= 0 then
+        if show_result then
+            self:showMessage(T(_("CWA Magic Downloads is up to date.\nInstalled version: %1"), self.version), 5)
+        end
+        return true
+    end
+
+    self:confirmAndInstallUpdate(update)
+    return true
 end
 
 function CwaMagicDownload:refreshShelfList(show_result)

@@ -29,7 +29,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.8",
+    version = "0.9.9",
     settings = nil,
     is_syncing = false,
     progress_widget = nil,
@@ -1376,6 +1376,7 @@ end
 
 function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
     local selected = {}
+    local marked_read_files = {}
     local limit = self.settings.limit or 25
     local next_path = shelf.path
     local page = 0
@@ -1393,6 +1394,10 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
 
         local xml = readFile(feed_file) or ""
         for _, book in ipairs(parseEntries(xml, self.settings.format_order)) do
+            local is_marked_read = book.id and read_ids and read_ids[book.id] == true
+            if read_filter == "unread" and is_marked_read then
+                marked_read_files[safeFilename(book.title, book.format)] = true
+            end
             if filterAllowsBook(read_filter, book.id, read_ids) then
                 if seen_book_ids and book.id and seen_book_ids[book.id] then
                     duplicate_count = duplicate_count + 1
@@ -1405,10 +1410,10 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
         next_path = parseNextPath(xml)
     end
 
-    return selected, nil, duplicate_count
+    return selected, nil, duplicate_count, marked_read_files
 end
 
-function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
+function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
     local list_file = cachePath("files.txt")
     os.execute("find " .. shellQuote(target_dir) .. " -maxdepth 1 -type f > " .. shellQuote(list_file))
     local files = readFile(list_file) or ""
@@ -1416,12 +1421,18 @@ function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files)
     for path in files:gmatch("[^\r\n]+") do
         local filename = path:match("([^/]+)$")
         if filename and not filename:match("%.part$") and not wanted_files[filename] then
-            os.execute("rm -f " .. shellQuote(path))
-            local sidecar_path = sidecarPathForBook(path)
-            if sidecar_path ~= path and isSafeChildPath(target_dir, sidecar_path) then
-                os.execute("rm -rf " .. shellQuote(sidecar_path))
+            local can_remove = localBookIsComplete(path)
+                or (marked_read_files and marked_read_files[filename] == true)
+            if can_remove then
+                os.execute("rm -f " .. shellQuote(path))
+                local sidecar_path = sidecarPathForBook(path)
+                if sidecar_path ~= path and isSafeChildPath(target_dir, sidecar_path) then
+                    os.execute("rm -rf " .. shellQuote(sidecar_path))
+                end
+                pruned = pruned + 1
+            else
+                logger.dbg("CWA Magic Downloads: keeping unmatched in-progress book", path)
             end
-            pruned = pruned + 1
         end
     end
     return pruned
@@ -1437,8 +1448,8 @@ function CwaMagicDownload:pruneDeselectedShelfFolders()
         if selected[shelf.id] == false then
             local target_dir = joinPath(root, self:getShelfFolderName(shelf))
             if isSafeChildPath(root, target_dir) then
-                os.execute("rm -rf " .. shellQuote(target_dir))
-                removed = removed + 1
+                removed = removed + self:pruneUnmatchedFiles(target_dir, {}, {})
+                os.execute("rmdir " .. shellQuote(target_dir) .. " 2>/dev/null")
             else
                 logger.warn("CWA Magic Downloads: refused to remove unsafe shelf folder", target_dir)
             end
@@ -1484,12 +1495,16 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
     self:migrateIconShelfFolder(root, shelf, target_dir)
     os.execute("mkdir -p " .. shellQuote(target_dir))
 
-    local books, err, duplicates = self:collectShelfBooks(shelf, read_ids, seen_book_ids)
+    local books, err, duplicates, marked_read_files = self:collectShelfBooks(shelf, read_ids, seen_book_ids)
     if not books then
         return { failed = 1, message = err or _("Could not fetch the shelf feed. Check Wi-Fi and login.") }
     end
     if #books == 0 then
-        return { empty = 1, folder = target_dir }
+        local pruned = 0
+        if self.settings.prune_unmatched then
+            pruned = self:pruneUnmatchedFiles(target_dir, {}, marked_read_files)
+        end
+        return { empty = 1, pruned = pruned, folder = target_dir }
     end
 
     local downloaded, skipped, failed, pruned, retimed = 0, 0, 0, 0, 0
@@ -1507,7 +1522,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
 
     if #kept_books == 0 then
         if self.settings.prune_unmatched then
-            pruned = self:pruneUnmatchedFiles(target_dir, wanted_files)
+            pruned = self:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
         end
         return { empty = 1, pruned = pruned, folder = target_dir }
     end
@@ -1545,7 +1560,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
     end
 
     if self.settings.prune_unmatched then
-        pruned = self:pruneUnmatchedFiles(target_dir, wanted_files)
+        pruned = self:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
     end
 
     return {

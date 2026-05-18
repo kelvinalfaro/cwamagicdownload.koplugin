@@ -42,7 +42,7 @@ Set:
 - `Show shelf icons`: toggles leading emoji/icons in shelf names for devices that render them as `?`.
 - `Check for plugin update`: checks GitHub for a newer release and installs it into this plugin folder after confirmation.
 - `Check for updates when KOReader starts`: checks GitHub at most once per day and prompts when a newer version is available.
-- `Limit`: maximum matching books per selected shelf.
+- `Limit`: maximum matching books per selected shelf. Selecting four shelves can therefore manage up to four times this value across all shelf folders.
 - `Download folder`: defaults to KOReader's home folder.
 
 ## Notes
@@ -59,6 +59,7 @@ Set:
 - The plugin uses KOReader's LuaSocket/LuaSec HTTP stack first, then falls back to KOReader/system `curl` when available.
 - Self-update downloads the latest plugin files from the GitHub `main` branch, installs them over the current plugin folder, and requires a KOReader restart before the new code is loaded.
 - A progress dialog is shown during shelf sync so long downloads no longer look frozen.
+- Shelf sync yields between network requests, shelves, and book operations so Android builds of KOReader are less likely to show system "not responding" prompts during longer syncs.
 - If no live CWA shelves are cached yet, opening the shelf menus will refresh the list automatically.
 
 ## Requirements

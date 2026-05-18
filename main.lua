@@ -29,9 +29,10 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.9",
+    version = "0.9.10",
     settings = nil,
     is_syncing = false,
+    sync_coroutine = nil,
     progress_widget = nil,
 }
 
@@ -714,7 +715,7 @@ function CwaMagicDownload:addToMainMenu(menu_items)
             },
             {
                 text_func = function()
-                    return T(_("Limit: %1 books"), self.settings.limit or 25)
+                    return T(_("Limit: %1 books per shelf"), self.settings.limit or 25)
                 end,
                 keep_menu_open = true,
                 tap_input_func = function()
@@ -1038,6 +1039,36 @@ function CwaMagicDownload:showMessage(text, timeout)
     })
 end
 
+function CwaMagicDownload:yieldSync()
+    if self.sync_coroutine and coroutine.running() == self.sync_coroutine then
+        UIManager:forceRePaint()
+        coroutine.yield()
+    end
+end
+
+function CwaMagicDownload:resumeSyncCoroutine()
+    if not self.sync_coroutine then return end
+
+    local ok, err = coroutine.resume(self.sync_coroutine)
+    if not ok then
+        self.sync_coroutine = nil
+        self.is_syncing = false
+        self:closeProgress()
+        logger.warn("CWA Magic Downloads: sync failed unexpectedly", err)
+        self:showMessage(_("CWA Magic Downloads failed. Check the KOReader log for details."), 8)
+        return
+    end
+
+    if coroutine.status(self.sync_coroutine) == "dead" then
+        self.sync_coroutine = nil
+        return
+    end
+
+    UIManager:scheduleIn(0.05, function()
+        self:resumeSyncCoroutine()
+    end)
+end
+
 function CwaMagicDownload:showProgress(text, pct)
     if not (CenterContainer and FrameContainer and VerticalGroup and VerticalSpan
             and TextBoxWidget and ProgressWidget and Blitbuffer and Font and Size
@@ -1156,11 +1187,13 @@ end
 
 function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time, no_auth)
     if self:fetchUrlToFileWithLua(url, out_file, max_time, no_auth) then
+        self:yieldSync()
         return true
     end
 
     local curl = findCurl()
     if not curl then
+        self:yieldSync()
         return false
     end
 
@@ -1177,6 +1210,7 @@ function CwaMagicDownload:fetchUrlToFile(url, out_file, max_time, no_auth)
     table.insert(parts, shellQuote(url))
     local cmd = table.concat(parts, " ")
     local ok = os.execute(cmd)
+    self:yieldSync()
     return ok == true or ok == 0
 end
 
@@ -1369,6 +1403,7 @@ function CwaMagicDownload:loadReadIds()
             read_ids[id] = value
         end
         next_path = parseNextPath(xml)
+        self:yieldSync()
     end
 
     return read_ids
@@ -1406,8 +1441,10 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
                     if #selected >= limit then break end
                 end
             end
+            self:yieldSync()
         end
         next_path = parseNextPath(xml)
+        self:yieldSync()
     end
 
     return selected, nil, duplicate_count, marked_read_files
@@ -1433,6 +1470,7 @@ function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files, marked_r
             else
                 logger.dbg("CWA Magic Downloads: keeping unmatched in-progress book", path)
             end
+            self:yieldSync()
         end
     end
     return pruned
@@ -1476,16 +1514,11 @@ function CwaMagicDownload:syncSelectedShelf()
     self.is_syncing = true
     local count = selectedShelfCount(self.settings)
     self:showProgress(T(_("Syncing %1 shelves\nPreparing..."), count), 0)
+    self.sync_coroutine = coroutine.create(function()
+        self:syncSelectedShelfNow()
+    end)
     UIManager:scheduleIn(0.25, function()
-        local ok, err = pcall(function()
-            self:syncSelectedShelfNow()
-        end)
-        if not ok then
-            self.is_syncing = false
-            self:closeProgress()
-            logger.warn("CWA Magic Downloads: sync failed unexpectedly", err)
-            self:showMessage(_("CWA Magic Downloads failed. Check the KOReader log for details."), 8)
-        end
+        self:resumeSyncCoroutine()
     end)
 end
 
@@ -1518,6 +1551,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
         else
             table.insert(kept_books, book)
         end
+        self:yieldSync()
     end
 
     if #kept_books == 0 then
@@ -1557,6 +1591,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
                 logger.warn("CWA Magic Downloads: failed to download", book_url, ok)
             end
         end
+        self:yieldSync()
     end
 
     if self.settings.prune_unmatched then

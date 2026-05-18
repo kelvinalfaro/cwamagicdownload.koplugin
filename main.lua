@@ -11,6 +11,7 @@ local function optionalRequire(name)
     return nil
 end
 local ConfirmBox = optionalRequire("ui/widget/confirmbox")
+local Time = optionalRequire("ui/time")
 local CenterContainer = optionalRequire("ui/widget/container/centercontainer")
 local FrameContainer = optionalRequire("ui/widget/container/framecontainer")
 local VerticalGroup = optionalRequire("ui/widget/verticalgroup")
@@ -29,7 +30,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.10",
+    version = "0.9.11",
     settings = nil,
     is_syncing = false,
     sync_coroutine = nil,
@@ -77,6 +78,7 @@ CwaMagicDownload.default_settings = {
     prune_unmatched = false,
     dedupe_across_shelves = true,
     show_shelf_icons = false,
+    author_subfolders = false,
     auto_check_updates = true,
     last_update_check = nil,
 }
@@ -154,6 +156,18 @@ local function compareVersions(left, right)
         end
     end
     return 0
+end
+
+local function progressElapsedMs(previous)
+    if Time and Time.now and Time.to_ms then
+        local now = Time.now()
+        local ok, elapsed = pcall(function()
+            return Time.to_ms(now - previous)
+        end)
+        if ok then return elapsed, now end
+    end
+    local now = os.clock() * 1000
+    return now - (previous or 0), now
 end
 
 local function isSafeChildPath(root, path)
@@ -328,6 +342,7 @@ local function parseEntries(xml, format_order)
     for entry in (xml or ""):gmatch("<entry>(.-)</entry>") do
         local title = decodeEntities(entry:match("<title>(.-)</title>"))
         local updated = entry:match("<updated>(.-)</updated>")
+        local author = decodeEntities(entry:match("<author>%s*<name>(.-)</name>") or "")
         local links = {}
         for link in entry:gmatch("<link%s.-/>") do
             if link:find("http://opds%-spec%.org/acquisition", 1, false) then
@@ -347,6 +362,7 @@ local function parseEntries(xml, format_order)
             table.insert(books, {
                 id = getBookIdFromHref(selected.href),
                 title = title,
+                author = author ~= "" and author or nil,
                 href = selected.href,
                 format = selected.format,
                 timestamp = selected.mtime or updated,
@@ -586,6 +602,47 @@ function CwaMagicDownload:ensureExistingBookInCurrentFolder(root, shelf, target_
     return true
 end
 
+function CwaMagicDownload:bookRelativePath(book)
+    local filename = safeFilename(book.title, book.format)
+    if self.settings.author_subfolders and book.author then
+        return joinPath(safeFolderName(book.author), filename)
+    end
+    return filename
+end
+
+function CwaMagicDownload:bookDir(target_dir, book)
+    if self.settings.author_subfolders and book.author then
+        return joinPath(target_dir, safeFolderName(book.author))
+    end
+    return target_dir
+end
+
+function CwaMagicDownload:ensureExistingBookAtPath(root, shelf, target_dir, out_path, filename)
+    if fileExists(out_path) then return true end
+
+    local candidates = {
+        joinPath(target_dir, filename),
+    }
+    if not self.settings.show_shelf_icons and shelf.folder then
+        table.insert(candidates, joinPath(joinPath(root, shelf.folder), filename))
+    end
+
+    for _, old_path in ipairs(candidates) do
+        if old_path ~= out_path and fileExists(old_path) then
+            os.execute("mkdir -p " .. shellQuote(out_path:gsub("/[^/]+$", "")))
+            os.execute("mv " .. shellQuote(old_path) .. " " .. shellQuote(out_path))
+            local old_sidecar = sidecarPathForBook(old_path)
+            local target_sidecar = sidecarPathForBook(out_path)
+            if dirExists(old_sidecar) and not dirExists(target_sidecar) then
+                os.execute("mv " .. shellQuote(old_sidecar) .. " " .. shellQuote(target_sidecar))
+            end
+            return true
+        end
+    end
+
+    return false
+end
+
 function CwaMagicDownload:groupShelvesForMenu()
     local magic, regular, builtin = {}, {}, {}
     for _, shelf in ipairs(allShelves(self.settings)) do
@@ -683,6 +740,17 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 help_text = _("When disabled, leading emoji/icons are hidden from shelf names because some devices render them as question marks."),
                 callback = function()
                     self.settings.show_shelf_icons = not self.settings.show_shelf_icons
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            },
+            {
+                text = _("Create author subfolders"),
+                checked_func = function()
+                    return self.settings.author_subfolders
+                end,
+                help_text = _("When enabled, each shelf folder is organized into author subfolders from the OPDS author metadata."),
+                callback = function()
+                    self.settings.author_subfolders = not self.settings.author_subfolders
                     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
                 end,
             },
@@ -1069,7 +1137,13 @@ function CwaMagicDownload:resumeSyncCoroutine()
     end)
 end
 
-function CwaMagicDownload:showProgress(text, pct)
+function CwaMagicDownload:showProgress(text, pct, force)
+    local elapsed, current_time = progressElapsedMs(self._last_progress_time)
+    if self._last_progress_time and elapsed < 500 and not force then
+        return
+    end
+    self._last_progress_time = current_time
+
     if not (CenterContainer and FrameContainer and VerticalGroup and VerticalSpan
             and TextBoxWidget and ProgressWidget and Blitbuffer and Font and Size
             and Device and Device.screen) then
@@ -1128,6 +1202,9 @@ function CwaMagicDownload:showProgress(text, pct)
 
     self.progress_widget = widget
     UIManager:show(self.progress_widget)
+    if UIManager.setDirty then
+        UIManager:setDirty(self.progress_widget, "ui")
+    end
     UIManager:forceRePaint()
 end
 
@@ -1136,6 +1213,7 @@ function CwaMagicDownload:closeProgress()
         UIManager:close(self.progress_widget)
         self.progress_widget = nil
     end
+    self._last_progress_time = nil
 end
 
 function CwaMagicDownload:getAuth()
@@ -1431,7 +1509,7 @@ function CwaMagicDownload:collectShelfBooks(shelf, read_ids, seen_book_ids)
         for _, book in ipairs(parseEntries(xml, self.settings.format_order)) do
             local is_marked_read = book.id and read_ids and read_ids[book.id] == true
             if read_filter == "unread" and is_marked_read then
-                marked_read_files[safeFilename(book.title, book.format)] = true
+                marked_read_files[self:bookRelativePath(book)] = true
             end
             if filterAllowsBook(read_filter, book.id, read_ids) then
                 if seen_book_ids and book.id and seen_book_ids[book.id] then
@@ -1452,14 +1530,16 @@ end
 
 function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
     local list_file = cachePath("files.txt")
-    os.execute("find " .. shellQuote(target_dir) .. " -maxdepth 1 -type f > " .. shellQuote(list_file))
+    local maxdepth = self.settings.author_subfolders and 2 or 1
+    os.execute("find " .. shellQuote(target_dir) .. " -maxdepth " .. tostring(maxdepth) .. " -type f > " .. shellQuote(list_file))
     local files = readFile(list_file) or ""
     local pruned = 0
     for path in files:gmatch("[^\r\n]+") do
         local filename = path:match("([^/]+)$")
-        if filename and not filename:match("%.part$") and not wanted_files[filename] then
+        local relative_path = isSafeChildPath(target_dir, path) and path:sub(#target_dir + 2) or filename
+        if filename and not filename:match("%.part$") and not wanted_files[relative_path] then
             local can_remove = localBookIsComplete(path)
-                or (marked_read_files and marked_read_files[filename] == true)
+                or (marked_read_files and (marked_read_files[relative_path] == true or marked_read_files[filename] == true))
             if can_remove then
                 os.execute("rm -f " .. shellQuote(path))
                 local sidecar_path = sidecarPathForBook(path)
@@ -1472,6 +1552,9 @@ function CwaMagicDownload:pruneUnmatchedFiles(target_dir, wanted_files, marked_r
             end
             self:yieldSync()
         end
+    end
+    if self.settings.author_subfolders then
+        os.execute("find " .. shellQuote(target_dir) .. " -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null")
     end
     return pruned
 end
@@ -1544,8 +1627,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
     local kept_books = {}
     local wanted_files = {}
     for _, book in ipairs(books) do
-        local filename = safeFilename(book.title, book.format)
-        local out_path = joinPath(target_dir, filename)
+        local out_path = joinPath(target_dir, self:bookRelativePath(book))
         if self:getShelfFilter(shelf) == "unread" and localBookIsComplete(out_path) then
             logger.dbg("CWA Magic Downloads: pruning locally completed unread-filtered book", out_path)
         else
@@ -1566,10 +1648,12 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
             seen_book_ids[book.id] = true
         end
         local filename = safeFilename(book.title, book.format)
-        wanted_files[filename] = true
-        local out_path = joinPath(target_dir, filename)
-        local already_exists = fileExists(out_path)
-            or self:ensureExistingBookInCurrentFolder(root, shelf, target_dir, filename)
+        local relative_path = self:bookRelativePath(book)
+        wanted_files[relative_path] = true
+        local author_dir = self:bookDir(target_dir, book)
+        local out_path = joinPath(target_dir, relative_path)
+        os.execute("mkdir -p " .. shellQuote(author_dir))
+        local already_exists = self:ensureExistingBookAtPath(root, shelf, target_dir, out_path, filename)
         if on_progress then
             on_progress(i, #kept_books, book.title, not already_exists)
         end

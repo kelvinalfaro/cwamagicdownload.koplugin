@@ -40,6 +40,7 @@ Set:
 - `Read status filter`: choose unread only, read only, or all books.
 - `Per-shelf read filters`: override the global read filter for a specific shelf or use that feed's default.
 - `Show shelf icons`: toggles leading emoji/icons in shelf names for devices that render them as `?`.
+- `Create shelf subfolders`: disable this to download books directly into the configured download root instead of one folder per shelf.
 - `Create author subfolders`: optionally groups downloaded books inside each shelf folder by OPDS author metadata.
 - `Check for plugin update`: checks GitHub for a newer release and installs it into this plugin folder after confirmation.
 - `Check for updates when KOReader starts`: checks GitHub at most once per day and prompts when a newer version is available.
@@ -48,7 +49,8 @@ Set:
 
 ## Notes
 
-- Files are downloaded into one subfolder per selected shelf.
+- Files are downloaded into one subfolder per selected shelf by default. Disable `Create shelf subfolders` to place them directly in the download root.
+- `Remove books that no longer match` is skipped when shelf subfolders are disabled, which prevents the plugin from deleting unrelated books in the shared download root.
 - Existing files are skipped.
 - Downloaded and skipped files are timestamped from CWA OPDS metadata when available, so KOReader date sorting can reflect CWA's added/updated date rather than download time.
 - Temporary OPDS files are written under KOReader's own `cache` directory instead of an Android-specific app path, so Kindle/Tolino builds can write them too.
@@ -72,4 +74,3 @@ Set:
 ## License
 
 AGPL-3.0-or-later. KOReader itself is AGPL-3.0, so this plugin uses the same license family for community compatibility.
-

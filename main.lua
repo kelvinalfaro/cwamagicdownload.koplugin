@@ -30,7 +30,7 @@ local _ = require("gettext")
 
 local CwaMagicDownload = WidgetContainer:extend{
     name = "cwamagicdownload",
-    version = "0.9.11",
+    version = "0.9.12",
     settings = nil,
     is_syncing = false,
     sync_coroutine = nil,
@@ -78,6 +78,7 @@ CwaMagicDownload.default_settings = {
     prune_unmatched = false,
     dedupe_across_shelves = true,
     show_shelf_icons = false,
+    shelf_subfolders = true,
     author_subfolders = false,
     auto_check_updates = true,
     last_update_check = nil,
@@ -557,6 +558,13 @@ function CwaMagicDownload:getShelfFolderName(shelf)
     return shelf.folder or safeFolderName(shelf.name)
 end
 
+function CwaMagicDownload:getShelfTargetDir(root, shelf)
+    if self.settings.shelf_subfolders == false then
+        return root
+    end
+    return joinPath(root, self:getShelfFolderName(shelf))
+end
+
 function CwaMagicDownload:migrateIconShelfFolder(root, shelf, target_dir)
     if self.settings.show_shelf_icons or not shelf.folder then return end
     local old_dir = joinPath(root, shelf.folder)
@@ -623,6 +631,10 @@ function CwaMagicDownload:ensureExistingBookAtPath(root, shelf, target_dir, out_
     local candidates = {
         joinPath(target_dir, filename),
     }
+    local shelf_dir = joinPath(root, self:getShelfFolderName(shelf))
+    if shelf_dir ~= target_dir then
+        table.insert(candidates, joinPath(shelf_dir, filename))
+    end
     if not self.settings.show_shelf_icons and shelf.folder then
         table.insert(candidates, joinPath(joinPath(root, shelf.folder), filename))
     end
@@ -740,6 +752,17 @@ function CwaMagicDownload:addToMainMenu(menu_items)
                 help_text = _("When disabled, leading emoji/icons are hidden from shelf names because some devices render them as question marks."),
                 callback = function()
                     self.settings.show_shelf_icons = not self.settings.show_shelf_icons
+                    G_reader_settings:saveSetting("cwamagicdownload", self.settings)
+                end,
+            },
+            {
+                text = _("Create shelf subfolders"),
+                checked_func = function()
+                    return self.settings.shelf_subfolders ~= false
+                end,
+                help_text = _("When disabled, books are downloaded directly into the download root. Cleanup is skipped in this mode to protect unrelated files in that folder."),
+                callback = function()
+                    self.settings.shelf_subfolders = self.settings.shelf_subfolders == false
                     G_reader_settings:saveSetting("cwamagicdownload", self.settings)
                 end,
             },
@@ -1561,6 +1584,7 @@ end
 
 function CwaMagicDownload:pruneDeselectedShelfFolders()
     if not self.settings.prune_unmatched then return 0 end
+    if self.settings.shelf_subfolders == false then return 0 end
     local selected = self.settings.selected_shelves or {}
     local root = self.settings.download_root or getHomeDir()
     local removed = 0
@@ -1607,8 +1631,10 @@ end
 
 function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progress)
     local root = self.settings.download_root or getHomeDir()
-    local target_dir = joinPath(root, self:getShelfFolderName(shelf))
-    self:migrateIconShelfFolder(root, shelf, target_dir)
+    local target_dir = self:getShelfTargetDir(root, shelf)
+    if self.settings.shelf_subfolders ~= false then
+        self:migrateIconShelfFolder(root, shelf, target_dir)
+    end
     os.execute("mkdir -p " .. shellQuote(target_dir))
 
     local books, err, duplicates, marked_read_files = self:collectShelfBooks(shelf, read_ids, seen_book_ids)
@@ -1617,7 +1643,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
     end
     if #books == 0 then
         local pruned = 0
-        if self.settings.prune_unmatched then
+        if self.settings.prune_unmatched and self.settings.shelf_subfolders ~= false then
             pruned = self:pruneUnmatchedFiles(target_dir, {}, marked_read_files)
         end
         return { empty = 1, pruned = pruned, folder = target_dir }
@@ -1637,7 +1663,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
     end
 
     if #kept_books == 0 then
-        if self.settings.prune_unmatched then
+        if self.settings.prune_unmatched and self.settings.shelf_subfolders ~= false then
             pruned = self:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
         end
         return { empty = 1, pruned = pruned, folder = target_dir }
@@ -1678,7 +1704,7 @@ function CwaMagicDownload:syncOneShelf(shelf, read_ids, seen_book_ids, on_progre
         self:yieldSync()
     end
 
-    if self.settings.prune_unmatched then
+    if self.settings.prune_unmatched and self.settings.shelf_subfolders ~= false then
         pruned = self:pruneUnmatchedFiles(target_dir, wanted_files, marked_read_files)
     end
 
